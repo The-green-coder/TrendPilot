@@ -5,22 +5,12 @@ calculation, portfolio simulation, and metric generation.
 """
 from __future__ import annotations
 
-import importlib.util
 import os
 from datetime import datetime
 from typing import Dict, Iterable
 
-_numpy_spec = importlib.util.find_spec("numpy")
-if _numpy_spec:
-    import numpy as np  # type: ignore
-else:  # pragma: no cover - offline fallback
-    import numpy_stub as np  # type: ignore
-
-_pandas_spec = importlib.util.find_spec("pandas")
-if _pandas_spec:
-    import pandas as pd  # type: ignore
-else:  # pragma: no cover - offline fallback
-    import pandas_stub as pd  # type: ignore
+import numpy as np
+import pandas as pd
 
 from MarketData import load_market_data
 from Trends_RuleEngine import get_rule
