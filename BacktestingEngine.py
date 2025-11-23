@@ -313,11 +313,32 @@ class BacktestingEngine:
 
         # ---- apply rebalance frequency -----------------------------------
         # Take allocation only at rebalance dates, then forward-fill.
+   
+        # ---- apply rebalance frequency with trading-day alignment ----
+        # Generate raw rebalance dates (may fall on weekends)
         rebalance_dates = raw_allocation.resample(rebalance_alias).first().index
-        allocation_rebalanced = raw_allocation.copy()
-        allocation_rebalanced.loc[:] = np.nan
-        allocation_rebalanced.loc[rebalance_dates] = raw_allocation.loc[rebalance_dates]
+        
+        # Align each rebalance date to the nearest previous trading date
+        aligned_rebalance_dates = []
+        for dt in rebalance_dates:
+            if dt in raw_allocation.index:
+                aligned_rebalance_dates.append(dt)
+            else:
+                # find nearest earlier trading day
+                earlier = raw_allocation.index[raw_allocation.index <= dt]
+                if len(earlier) > 0:
+                    aligned_rebalance_dates.append(earlier[-1])
+        
+        aligned_rebalance_dates = pd.DatetimeIndex(aligned_rebalance_dates).unique()
+        
+        # Build rebalanced allocation series
+        allocation_rebalanced = pd.Series(index=raw_allocation.index, dtype=float)
+        allocation_rebalanced[:] = float("nan")
+        allocation_rebalanced.loc[aligned_rebalance_dates] = raw_allocation.loc[aligned_rebalance_dates]
+        
+        # Forward-fill between rebalances
         allocation_rebalanced = allocation_rebalanced.ffill().bfill()
+
 
         # ---- apply delay between signal and trade ------------------------
         allocation = self._apply_delay(allocation_rebalanced, delay)
