@@ -7,28 +7,17 @@ in offline environments.
 """
 from __future__ import annotations
 
-import importlib.util
 import logging
 import os
 from datetime import datetime, timedelta
 from typing import Dict, Iterable, Tuple
 
-_numpy_spec = importlib.util.find_spec("numpy")
-if _numpy_spec:
-    import numpy as np  # type: ignore
-else:  # pragma: no cover - offline fallback
-    import numpy_stub as np  # type: ignore
+import numpy as np
+import pandas as pd
 
-_pandas_spec = importlib.util.find_spec("pandas")
-if _pandas_spec:
-    import pandas as pd  # type: ignore
-else:  # pragma: no cover - offline fallback
-    import pandas_stub as pd  # type: ignore
-
-_yfinance_spec = importlib.util.find_spec("yfinance")
-if _yfinance_spec:  # pragma: no cover - optional dependency
-    import yfinance as yf  # type: ignore
-else:  # pragma: no cover - fallback when yfinance is missing
+try:  # pragma: no cover - optional dependency
+    import yfinance as yf
+except Exception:  # pragma: no cover - fallback when yfinance is missing
     yf = None  # type: ignore
 
 
@@ -88,26 +77,8 @@ def fetch_symbol_data(symbol: str, start: datetime, end: datetime, data_path: st
             LOGGER.warning("Falling back to synthetic data for %s due to error: %s", symbol, exc)
             df = _generate_synthetic_prices(symbol, start, end)
 
-    # Normalize the datetime column so downstream code always sees a "date" column
-    # regardless of how yfinance names the index. The ``names`` argument works on
-    # modern pandas, but we keep a backwards-compatible fallback for older
-    # versions (and for the lightweight stub used offline).
-    try:  # pandas >= 1.3
-        df.reset_index(names="date", inplace=True)
-    except TypeError:  # pragma: no cover - legacy pandas path
-        df.reset_index(inplace=True)
-    # Handle common datetime column names that may appear after reset_index
-    rename_candidates = {
-        "index": "date",
-        "Date": "date",
-        "Datetime": "date",
-        "datetime": "date",
-    }
-    df.rename(columns=rename_candidates, inplace=True)
-    if "date" not in df.columns:
-        # As a last resort, promote the original index to a column
-        df["date"] = df.index
-        df.reset_index(drop=True, inplace=True)
+    df.reset_index(inplace=True)
+    df.rename(columns={"index": "date"}, inplace=True)
     df.to_csv(filepath, index=False)
     df.set_index("date", inplace=True)
     return df

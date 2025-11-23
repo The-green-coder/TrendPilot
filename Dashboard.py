@@ -1,18 +1,13 @@
 """Minimal Plotly Dash dashboard for TrendPilot results."""
 from __future__ import annotations
 
-import importlib.util
 import os
 from glob import glob
 from typing import Tuple
 
 import dash
 from dash import dcc, html
-_pandas_spec = importlib.util.find_spec("pandas")
-if _pandas_spec:
-    import pandas as pd  # type: ignore
-else:  # pragma: no cover - offline fallback
-    import pandas_stub as pd  # type: ignore
+import pandas as pd
 import plotly.express as px
 
 
