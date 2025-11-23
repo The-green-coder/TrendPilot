@@ -1,0 +1,15 @@
+parameter,value
+data_path,MarketData
+results_path,ResultsData
+initial_capital,100000
+transaction_cost,0.001
+slippage,0.0005
+backtesting_period,5Y
+rebalance_frequency,Weekly
+buy_price_preference,close
+sell_price_preference,close
+rule_name,TripleTrend_QuickerResponse1
+delay_between_signal_and_trade,1
+eraseDataAfterRun,No
+benchmark_price_preference,close
+risk_free_rate,0.01
