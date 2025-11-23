@@ -1,0 +1,219 @@
+"""Backtesting logic for TrendPilot.
+
+This module orchestrates strategy execution, including signal
+calculation, portfolio simulation, and metric generation.
+"""
+from __future__ import annotations
+
+import importlib.util
+import os
+from datetime import datetime
+from typing import Dict, Iterable
+
+_numpy_spec = importlib.util.find_spec("numpy")
+if _numpy_spec:
+    import numpy as np  # type: ignore
+else:  # pragma: no cover - offline fallback
+    import numpy_stub as np  # type: ignore
+
+_pandas_spec = importlib.util.find_spec("pandas")
+if _pandas_spec:
+    import pandas as pd  # type: ignore
+else:  # pragma: no cover - offline fallback
+    import pandas_stub as pd  # type: ignore
+
+from MarketData import load_market_data
+from Trends_RuleEngine import get_rule
+
+
+REBALANCE_FREQ = {
+    "DAILY": "D",
+    "WEEKLY": "W-FRI",
+    "MONTHLY": "M",
+    "QUARTERLY": "Q",
+}
+
+
+class BacktestResult:
+    def __init__(self, performance: pd.DataFrame, risk: pd.DataFrame, allocations: pd.DataFrame, equity_curve: pd.DataFrame):
+        self.performance = performance
+        self.risk = risk
+        self.allocations = allocations
+        self.equity_curve = equity_curve
+
+
+class BacktestingEngine:
+    def __init__(self, config: Dict[str, str], strategy_name: str):
+        self.config = config
+        self.strategy_name = strategy_name
+
+    def _get_price(self, df: pd.DataFrame, preference: str) -> pd.Series:
+        preference = preference.lower()
+        if preference not in df.columns:
+            raise KeyError(f"Price preference '{preference}' not available in data columns {df.columns}")
+
+        series = df[preference]
+
+        # Guard against legacy caches that may contain stray strings by
+        # coercing to numeric before computing returns. Missing values are
+        # forward/backward filled so pct_change does not encounter ``NaN``
+        # gaps on sparse datasets.
+        try:
+            series = pd.to_numeric(series, errors="coerce")
+        except Exception:
+            pass
+
+        if hasattr(series, "ffill"):
+            series = series.ffill()
+            if hasattr(series, "bfill"):
+                series = series.bfill()
+            elif hasattr(series, "fillna"):
+                series = series.fillna(method="bfill")
+
+        return series
+
+    def _resample_allocations(self, allocation: pd.Series, frequency: str) -> pd.Series:
+        freq = REBALANCE_FREQ.get(frequency.upper(), "W-FRI")
+        return allocation.resample(freq).last().reindex(allocation.index).ffill()
+
+    def _apply_delay(self, allocation: pd.Series, delay: int) -> pd.Series:
+        if delay <= 0:
+            return allocation
+        shifted = allocation.shift(delay)
+        if hasattr(shifted, "bfill"):
+            return shifted.bfill()
+        return shifted.fillna(method="bfill")
+
+    def _portfolio_returns(self, risk_on_allocation: pd.Series, risk_on_returns: pd.Series, risk_off_returns: pd.Series, transaction_cost: float, slippage: float) -> pd.Series:
+        allocation_change = risk_on_allocation.diff().fillna(risk_on_allocation)
+        cost = (transaction_cost + slippage) * allocation_change.abs()
+        daily_return = risk_on_allocation * risk_on_returns + (1 - risk_on_allocation) * risk_off_returns - cost
+        return daily_return
+
+    def _max_drawdown(self, equity: pd.Series) -> float:
+        cumulative_max = equity.cummax()
+        drawdown = (equity - cumulative_max) / cumulative_max
+        return drawdown.min()
+
+    def _annualized_volatility(self, returns: pd.Series) -> float:
+        return returns.std() * np.sqrt(252)
+
+    def _cagr(self, equity: pd.Series) -> float:
+        total_return = equity.iloc[-1] / equity.iloc[0]
+        years = (equity.index[-1] - equity.index[0]).days / 365.25
+        return total_return ** (1 / years) - 1 if years > 0 else np.nan
+
+    def _sharpe(self, returns: pd.Series, risk_free_rate: float) -> float:
+        excess = returns - risk_free_rate / 252
+        return np.sqrt(252) * excess.mean() / excess.std() if excess.std() != 0 else np.nan
+
+    def run(self, risk_on_symbols: Iterable[str], risk_off_symbols: Iterable[str], benchmark_symbols: Iterable[str], start: datetime, end: datetime, data_path: str, results_path: str) -> BacktestResult:
+        data = load_market_data(set(risk_on_symbols) | set(risk_off_symbols) | set(benchmark_symbols), start, end, data_path, refresh=False)
+
+        risk_on_symbol = list(risk_on_symbols)[0]
+        risk_off_symbol = list(risk_off_symbols)[0]
+        benchmark_symbol = list(benchmark_symbols)[0]
+
+        risk_on = data[risk_on_symbol]
+        risk_off = data[risk_off_symbol]
+        benchmark = data[benchmark_symbol]
+
+        price_preference_buy = self.config.get("buy_price_preference", "close")
+        price_preference_sell = self.config.get("sell_price_preference", "close")
+        benchmark_preference = self.config.get("benchmark_price_preference", "close")
+
+        price_series = self._get_price(risk_on, price_preference_buy)
+        rule = get_rule(self.config["rule_name"])
+        allocation = rule(price_series)
+
+        allocation = self._resample_allocations(allocation, self.config.get("rebalance_frequency", "Weekly"))
+        allocation = self._apply_delay(allocation, int(self.config.get("delay_between_signal_and_trade", 0)))
+        allocation = allocation.clip(0, 1)
+
+        risk_on_returns = self._get_price(risk_on, price_preference_sell).pct_change().fillna(0)
+        risk_off_returns = self._get_price(risk_off, price_preference_sell).pct_change().fillna(0)
+        benchmark_returns = self._get_price(benchmark, benchmark_preference).pct_change().fillna(0)
+
+        transaction_cost = float(self.config.get("transaction_cost", 0))
+        slippage = float(self.config.get("slippage", 0))
+        daily_risk_on_component = allocation * risk_on_returns
+        daily_risk_off_component = (1 - allocation) * risk_off_returns
+        transaction_component = (transaction_cost + slippage) * allocation.diff().fillna(allocation).abs()
+
+        daily_returns = daily_risk_on_component + daily_risk_off_component - transaction_component
+        equity = (1 + daily_returns).cumprod() * float(self.config.get("initial_capital", 100000))
+        benchmark_equity = (1 + benchmark_returns).cumprod() * float(self.config.get("initial_capital", 100000))
+
+        risk_free_rate = float(self.config.get("risk_free_rate", 0.0))
+
+        total_return = equity.iloc[-1] / equity.iloc[0] - 1
+        benchmark_total_return = benchmark_equity.iloc[-1] / benchmark_equity.iloc[0] - 1
+
+        # Contribution breakdown
+        def safe_sum(series) -> float:
+            if hasattr(series, "sum"):
+                try:
+                    return float(series.sum())
+                except Exception:
+                    pass
+            if hasattr(np, "sum"):
+                try:
+                    return float(np.sum(series))
+                except Exception:
+                    pass
+            try:
+                return float(sum(series))
+            except Exception:
+                return 0.0
+
+        risk_on_contribution = safe_sum(daily_risk_on_component)
+        risk_off_contribution = safe_sum(daily_risk_off_component)
+        transaction_cost_impact = -safe_sum(transaction_component)
+        contribution_sum = risk_on_contribution + risk_off_contribution + transaction_cost_impact
+        contribution_denominator = contribution_sum if contribution_sum != 0 else 1
+
+        performance = pd.DataFrame({
+            "final_portfolio_value": [equity.iloc[-1]],
+            "benchmark_final_value": [benchmark_equity.iloc[-1]],
+            "total_return": [total_return],
+            "benchmark_total_return": [benchmark_total_return],
+            "cagr": [self._cagr(equity)],
+            "risk_on_time_pct": [allocation.mean() * 100],
+            "risk_off_time_pct": [(1 - allocation).mean() * 100],
+            "risk_on_return_contribution": [risk_on_contribution],
+            "risk_off_return_contribution": [risk_off_contribution],
+            "transaction_cost_impact": [transaction_cost_impact],
+            "risk_on_contribution_pct_of_total": [risk_on_contribution / contribution_denominator * 100],
+            "risk_off_contribution_pct_of_total": [risk_off_contribution / contribution_denominator * 100],
+            "transaction_cost_pct_of_total": [transaction_cost_impact / contribution_denominator * 100],
+        })
+
+        risk_stats = pd.DataFrame({
+            "volatility": [self._annualized_volatility(daily_returns)],
+            "benchmark_volatility": [self._annualized_volatility(benchmark_returns)],
+            "max_drawdown": [self._max_drawdown(equity / equity.iloc[0])],
+            "benchmark_max_drawdown": [self._max_drawdown(benchmark_equity / benchmark_equity.iloc[0])],
+            "sharpe_ratio": [self._sharpe(daily_returns, risk_free_rate)],
+            "benchmark_sharpe_ratio": [self._sharpe(benchmark_returns, risk_free_rate)],
+        })
+
+        allocations = pd.DataFrame({
+            "risk_on_allocation": allocation,
+            "risk_off_allocation": 1 - allocation,
+        })
+
+        equity_curve = pd.DataFrame({
+            "equity": equity,
+            "benchmark": benchmark_equity,
+        })
+
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        strategy_results_path = os.path.join(results_path, self.strategy_name)
+        os.makedirs(strategy_results_path, exist_ok=True)
+
+        performance.to_csv(os.path.join(strategy_results_path, f"PerformanceStats_{timestamp}.csv"), index=False)
+        risk_stats.to_csv(os.path.join(strategy_results_path, f"RiskStats_{timestamp}.csv"), index=False)
+        allocations.reset_index().rename(columns={"index": "date"}).to_csv(os.path.join(strategy_results_path, f"Allocation_{timestamp}.csv"), index=False)
+        equity_curve.reset_index().rename(columns={"index": "date"}).to_csv(os.path.join(strategy_results_path, f"Equity_{timestamp}.csv"), index=False)
+
+        return BacktestResult(performance, risk_stats, allocations, equity_curve)
