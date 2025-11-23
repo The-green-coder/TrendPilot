@@ -15,8 +15,7 @@ import os
 from typing import Optional, Tuple
 
 import dash
-from dash import Dash, dcc, html
-import dash_table
+from dash import Dash, dcc, html, dash_table  # <-- dash_table imported from dash
 import pandas as pd
 import plotly.graph_objs as go
 
@@ -110,10 +109,13 @@ summary_items = [
     f"Return contribution: "
     f"{_format_pct(perf_row.get('risk_on_contrib_pct'))} from Risk-On, "
     f"{_format_pct(perf_row.get('risk_off_contrib_pct'))} from Risk-Off",
+    f"Standalone asset returns: "
+    f"Risk-On {_format_pct(perf_row.get('risk_on_total_return_pct'))}, "
+    f"Risk-Off {_format_pct(perf_row.get('risk_off_total_return_pct'))}",
     f"Sharpe (strategy): {_format_num(risk_row.get('sharpe_strategy'), 3)}",
     f"Sharpe (benchmark): {_format_num(risk_row.get('sharpe_benchmark'), 3)}",
-    f"Volatility (strategy): {_format_pct(risk_row.get('vol_strategy'), 2)}",
-    f"Volatility (benchmark): {_format_pct(risk_row.get('vol_benchmark'), 2)}",
+    f"Volatility (strategy): {_format_pct(risk_row.get('vol_strategy') * 100.0, 2)}",
+    f"Volatility (benchmark): {_format_pct(risk_row.get('vol_benchmark') * 100.0, 2)}",
     f"Max drawdown (strategy): {_format_pct(risk_row.get('max_drawdown_strategy') * 100.0, 2)}",
     f"Max drawdown (benchmark): {_format_pct(risk_row.get('max_drawdown_benchmark') * 100.0, 2)}",
 ]
@@ -224,5 +226,4 @@ dash_app.layout = html.Div(
 
 
 if __name__ == "__main__":
-    # Dash 2.x+ uses app.run, not run_server
     dash_app.run(debug=True)
