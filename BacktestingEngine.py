@@ -266,7 +266,10 @@ class BacktestingEngine:
         benchmark_df = data[benchmark]
 
         # ---- signal prices & rule ----------------------------------------
-        signal_price_series = _select_price_column(risk_on_df, price_preference_buy).astype(float)
+        # Use robust numeric conversion to avoid issues like 'qqq' strings
+        raw_signal_prices = _select_price_column(risk_on_df, price_preference_buy)
+        signal_price_series = pd.to_numeric(raw_signal_prices, errors="coerce")
+        signal_price_series = signal_price_series.ffill().bfill()
 
         # ensure rule output is a Series aligned to common_index
         raw_allocation = rule(signal_price_series)
@@ -284,7 +287,9 @@ class BacktestingEngine:
 
         # ---- compute returns ---------------------------------------------
         def _price_series(df: pd.DataFrame) -> pd.Series:
-            return _select_price_column(df, price_preference_sell).astype(float)
+            raw = _select_price_column(df, price_preference_sell)
+            s = pd.to_numeric(raw, errors="coerce")
+            return s.ffill().bfill()
 
         risk_on_price = _price_series(risk_on_df)
         risk_off_price = _price_series(risk_off_df)
