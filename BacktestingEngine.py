@@ -71,9 +71,35 @@ class BacktestingEngine:
         years = (equity.index[-1] - equity.index[0]).days / 365.25
         return total_return ** (1 / years) - 1 if years > 0 else np.nan
 
-    def _sharpe(self, returns: pd.Series, risk_free_rate: float) -> float:
-        excess = returns - risk_free_rate / 252
-        return np.sqrt(252) * excess.mean() / excess.std() if excess.std() != 0 else np.nan
+    def _sharpe(self, daily_returns, risk_free_rate: float = 0.0):
+        """
+        Compute annualised Sharpe ratio.
+    
+        Handles both:
+        - pandas.Series of daily returns
+        - pandas.DataFrame (uses the first column by default)
+        """
+        import pandas as pd
+        import numpy as np
+    
+        # If we get a DataFrame, assume first column is the strategy returns
+        if isinstance(daily_returns, pd.DataFrame):
+            if daily_returns.shape[1] == 0:
+                return np.nan
+            series = daily_returns.iloc[:, 0]
+        else:
+            series = daily_returns
+    
+        # Excess returns over daily risk-free rate
+        excess = series - risk_free_rate / 252.0
+    
+        std = excess.std()
+    
+        # Guard against NaN or zero std
+        if pd.isna(std) or std == 0:
+            return np.nan
+    
+        return float(np.sqrt(252.0) * excess.mean() / std)
 
     def run(self, risk_on_symbols: Iterable[str], risk_off_symbols: Iterable[str], benchmark_symbols: Iterable[str], start: datetime, end: datetime, data_path: str, results_path: str) -> BacktestResult:
         data = load_market_data(set(risk_on_symbols) | set(risk_off_symbols) | set(benchmark_symbols), start, end, data_path, refresh=False)
