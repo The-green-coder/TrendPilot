@@ -5,22 +5,14 @@ calculation, portfolio simulation, and metric generation.
 """
 from __future__ import annotations
 
-import importlib.util
 import os
 from datetime import datetime
 from typing import Dict, Iterable
 
-_numpy_spec = importlib.util.find_spec("numpy")
-if _numpy_spec:
-    import numpy as np  # type: ignore
-else:  # pragma: no cover - offline fallback
-    import numpy_stub as np  # type: ignore
+import numpy as np
+import pandas as pd
+import logging
 
-_pandas_spec = importlib.util.find_spec("pandas")
-if _pandas_spec:
-    import pandas as pd  # type: ignore
-else:  # pragma: no cover - offline fallback
-    import pandas_stub as pd  # type: ignore
 
 from MarketData import load_market_data
 from Trends_RuleEngine import get_rule
@@ -51,29 +43,7 @@ class BacktestingEngine:
         preference = preference.lower()
         if preference not in df.columns:
             raise KeyError(f"Price preference '{preference}' not available in data columns {df.columns}")
-
-        series = df[preference]
-
-        # Guard against legacy caches that may contain stray strings by
-        # coercing to numeric before computing returns. Missing values are
-        # forward/backward filled so pct_change does not encounter ``NaN``
-        # gaps on sparse datasets.
-        try:
-            series = pd.to_numeric(series, errors="coerce")
-        except Exception:
-            pass
-
-        if hasattr(series, "ffill"):
-            series = series.ffill()
-        if hasattr(series, "bfill"):
-            series = series.bfill()
-        elif hasattr(series, "fillna"):
-            # pandas deprecated ``fillna(method="bfill")``; prefer a direct
-            # ``bfill`` call when available and fall back to stub-compatible
-            # semantics otherwise.
-            series = series.fillna(method="bfill")
-
-        return series
+        return df[preference]
 
     def _resample_allocations(self, allocation: pd.Series, frequency: str) -> pd.Series:
         freq = REBALANCE_FREQ.get(frequency.upper(), "W-FRI")
@@ -82,10 +52,7 @@ class BacktestingEngine:
     def _apply_delay(self, allocation: pd.Series, delay: int) -> pd.Series:
         if delay <= 0:
             return allocation
-        shifted = allocation.shift(delay)
-        if hasattr(shifted, "bfill"):
-            return shifted.bfill()
-        return shifted.fillna(method="bfill")
+        return allocation.shift(delay).fillna(method="bfill")
 
     def _portfolio_returns(self, risk_on_allocation: pd.Series, risk_on_returns: pd.Series, risk_off_returns: pd.Series, transaction_cost: float, slippage: float) -> pd.Series:
         allocation_change = risk_on_allocation.diff().fillna(risk_on_allocation)
@@ -106,9 +73,35 @@ class BacktestingEngine:
         years = (equity.index[-1] - equity.index[0]).days / 365.25
         return total_return ** (1 / years) - 1 if years > 0 else np.nan
 
-    def _sharpe(self, returns: pd.Series, risk_free_rate: float) -> float:
-        excess = returns - risk_free_rate / 252
-        return np.sqrt(252) * excess.mean() / excess.std() if excess.std() != 0 else np.nan
+    def _sharpe(self, daily_returns, risk_free_rate: float = 0.0):
+        """
+        Compute annualised Sharpe ratio.
+    
+        Handles both:
+        - pandas.Series of daily returns
+        - pandas.DataFrame (uses the first column by default)
+        """
+        import pandas as pd
+        import numpy as np
+    
+        # If we get a DataFrame, assume first column is the strategy returns
+        if isinstance(daily_returns, pd.DataFrame):
+            if daily_returns.shape[1] == 0:
+                return np.nan
+            series = daily_returns.iloc[:, 0]
+        else:
+            series = daily_returns
+    
+        # Excess returns over daily risk-free rate
+        excess = series - risk_free_rate / 252.0
+    
+        std = excess.std()
+    
+        # Guard against NaN or zero std
+        if pd.isna(std) or std == 0:
+            return np.nan
+    
+        return float(np.sqrt(252.0) * excess.mean() / std)
 
     def run(self, risk_on_symbols: Iterable[str], risk_off_symbols: Iterable[str], benchmark_symbols: Iterable[str], start: datetime, end: datetime, data_path: str, results_path: str) -> BacktestResult:
         data = load_market_data(set(risk_on_symbols) | set(risk_off_symbols) | set(benchmark_symbols), start, end, data_path, refresh=False)
@@ -133,71 +126,39 @@ class BacktestingEngine:
         allocation = self._apply_delay(allocation, int(self.config.get("delay_between_signal_and_trade", 0)))
         allocation = allocation.clip(0, 1)
 
-        risk_on_returns = self._get_price(risk_on, price_preference_sell).pct_change().fillna(0)
-        risk_off_returns = self._get_price(risk_off, price_preference_sell).pct_change().fillna(0)
-        benchmark_returns = self._get_price(benchmark, benchmark_preference).pct_change().fillna(0)
-
-        transaction_cost = float(self.config.get("transaction_cost", 0))
-        slippage = float(self.config.get("slippage", 0))
-        daily_risk_on_component = allocation * risk_on_returns
-        daily_risk_off_component = (1 - allocation) * risk_off_returns
-        transaction_component = (transaction_cost + slippage) * allocation.diff().fillna(allocation).abs()
-
-        daily_returns = daily_risk_on_component + daily_risk_off_component - transaction_component
+        # Convert selected price series to numeric before computing returns
+        risk_on_price = self._get_price(risk_on, price_preference_sell)
+        risk_on_price = pd.to_numeric(risk_on_price, errors="coerce")
+        risk_on_returns = risk_on_price.pct_change().fillna(0)
+        
+        risk_off_price = self._get_price(risk_off, price_preference_sell)
+        risk_off_price = pd.to_numeric(risk_off_price, errors="coerce")
+        risk_off_returns = risk_off_price.pct_change().fillna(0)
+        
+        benchmark_price = self._get_price(benchmark, price_preference_sell)
+        benchmark_price = pd.to_numeric(benchmark_price, errors="coerce")
+        benchmark_returns = benchmark_price.pct_change().fillna(0)
+        
+        
+        daily_returns = self._portfolio_returns(allocation, risk_on_returns, risk_off_returns, float(self.config.get("transaction_cost", 0)), float(self.config.get("slippage", 0)))
         equity = (1 + daily_returns).cumprod() * float(self.config.get("initial_capital", 100000))
         benchmark_equity = (1 + benchmark_returns).cumprod() * float(self.config.get("initial_capital", 100000))
 
         risk_free_rate = float(self.config.get("risk_free_rate", 0.0))
 
-        total_return = equity.iloc[-1] / equity.iloc[0] - 1
-        benchmark_total_return = benchmark_equity.iloc[-1] / benchmark_equity.iloc[0] - 1
-
-        # Contribution breakdown
-        def safe_sum(series) -> float:
-            if hasattr(series, "sum"):
-                try:
-                    return float(series.sum())
-                except Exception:
-                    pass
-            if hasattr(np, "sum"):
-                try:
-                    return float(np.sum(series))
-                except Exception:
-                    pass
-            try:
-                return float(sum(series))
-            except Exception:
-                return 0.0
-
-        risk_on_contribution = safe_sum(daily_risk_on_component)
-        risk_off_contribution = safe_sum(daily_risk_off_component)
-        transaction_cost_impact = -safe_sum(transaction_component)
-        contribution_sum = risk_on_contribution + risk_off_contribution + transaction_cost_impact
-        contribution_denominator = contribution_sum if contribution_sum != 0 else 1
-
         performance = pd.DataFrame({
             "final_portfolio_value": [equity.iloc[-1]],
             "benchmark_final_value": [benchmark_equity.iloc[-1]],
-            "total_return": [total_return],
-            "benchmark_total_return": [benchmark_total_return],
+            "total_return": [equity.iloc[-1] / equity.iloc[0] - 1],
+            "benchmark_total_return": [benchmark_equity.iloc[-1] / benchmark_equity.iloc[0] - 1],
             "cagr": [self._cagr(equity)],
-            "risk_on_time_pct": [allocation.mean() * 100],
-            "risk_off_time_pct": [(1 - allocation).mean() * 100],
-            "risk_on_return_contribution": [risk_on_contribution],
-            "risk_off_return_contribution": [risk_off_contribution],
-            "transaction_cost_impact": [transaction_cost_impact],
-            "risk_on_contribution_pct_of_total": [risk_on_contribution / contribution_denominator * 100],
-            "risk_off_contribution_pct_of_total": [risk_off_contribution / contribution_denominator * 100],
-            "transaction_cost_pct_of_total": [transaction_cost_impact / contribution_denominator * 100],
         })
 
         risk_stats = pd.DataFrame({
             "volatility": [self._annualized_volatility(daily_returns)],
             "benchmark_volatility": [self._annualized_volatility(benchmark_returns)],
             "max_drawdown": [self._max_drawdown(equity / equity.iloc[0])],
-            "benchmark_max_drawdown": [self._max_drawdown(benchmark_equity / benchmark_equity.iloc[0])],
             "sharpe_ratio": [self._sharpe(daily_returns, risk_free_rate)],
-            "benchmark_sharpe_ratio": [self._sharpe(benchmark_returns, risk_free_rate)],
         })
 
         allocations = pd.DataFrame({
