@@ -59,28 +59,79 @@ def _generate_synthetic_prices(symbol: str, start: datetime, end: datetime) -> p
 
 
 def fetch_symbol_data(symbol: str, start: datetime, end: datetime, data_path: str, refresh: bool = False) -> pd.DataFrame:
+    """
+    Fetch data for a single symbol between start and end.
+
+    - If a cached CSV exists and refresh is False, load from disk.
+    - Otherwise, download from yfinance and save to CSV.
+    - Always ensure we end up with a 'date' column as DateTimeIndex.
+    """
     os.makedirs(data_path, exist_ok=True)
     filepath = os.path.join(data_path, f"{symbol}.csv")
+
+    # Use cached CSV if present and refresh is False
     if os.path.exists(filepath) and not refresh:
-        return pd.read_csv(filepath, parse_dates=["date"], index_col="date")
-
-    if yf is None:
-        LOGGER.warning("yfinance unavailable; generating synthetic data for %s", symbol)
-        df = _generate_synthetic_prices(symbol, start, end)
+        # Load with 'date' as DateTimeIndex if present
+        df = pd.read_csv(filepath)
     else:
-        try:
-            df = yf.download(symbol, start=start, end=end)
-            if df.empty:
-                raise RuntimeError("Empty dataset returned from Yahoo Finance")
-            df = df.rename(columns=str.lower)
-        except Exception as exc:  # pragma: no cover - network failure path
-            LOGGER.warning("Falling back to synthetic data for %s due to error: %s", symbol, exc)
+        # If yfinance not available, fall back to synthetic data
+        if yf is None:
+            LOGGER.warning("yfinance unavailable; generating synthetic data for %s", symbol)
             df = _generate_synthetic_prices(symbol, start, end)
+        else:
+            try:
+                df = yf.download(symbol, start=start, end=end)
+                if df.empty:
+                    raise RuntimeError("Empty dataset returned from Yahoo Finance")
 
-    df.reset_index(inplace=True)
-    df.rename(columns={"index": "date"}, inplace=True)
-    df.to_csv(filepath, index=False)
+                # Make column names lower-case for consistency (open, high, low, close, adj close, volume)
+                df = df.rename(columns=str.lower)
+
+            except Exception as exc:
+                # Network failure or other error -> synthetic data
+                LOGGER.warning("Falling back to synthetic data for %s due to error: %s", symbol, exc)
+                df = _generate_synthetic_prices(symbol, start, end)
+
+        # yfinance gives a DatetimeIndex; after reset_index, we get a 'Date' column.
+        df.reset_index(inplace=True)
+
+        # Normalise to a 'date' column
+        if "Date" in df.columns:
+            df.rename(columns={"Date": "date"}, inplace=True)
+        elif "date" not in df.columns and "index" in df.columns:
+            df.rename(columns={"index": "date"}, inplace=True)
+
+        if "date" not in df.columns:
+            raise KeyError(f"No 'date' column found after reset_index for symbol {symbol}")
+
+        df.to_csv(filepath, index=False)
+
+    # Ensure 'date' column exists when loading cached data as well
+    if "date" not in df.columns:
+        if "Date" in df.columns:
+            df.rename(columns={"Date": "date"}, inplace=True)
+        elif "index" in df.columns:
+            df.rename(columns={"index": "date"}, inplace=True)
+
+    if "date" not in df.columns:
+        raise KeyError(f"No 'date' column found in cached CSV for symbol {symbol}")
+
+    df["date"] = pd.to_datetime(df["date"])
     df.set_index("date", inplace=True)
+
+    # Standardise column names again in case loaded from CSV
+    df.rename(
+        columns={
+            "Open": "open",
+            "High": "high",
+            "Low": "low",
+            "Close": "close",
+            "Adj Close": "adj_close",
+            "Volume": "volume",
+        },
+        inplace=True,
+    )
+
     return df
 
 
