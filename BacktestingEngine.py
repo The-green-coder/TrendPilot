@@ -124,10 +124,20 @@ class BacktestingEngine:
         allocation = self._apply_delay(allocation, int(self.config.get("delay_between_signal_and_trade", 0)))
         allocation = allocation.clip(0, 1)
 
-        risk_on_returns = self._get_price(risk_on, price_preference_sell).pct_change().fillna(0)
-        risk_off_returns = self._get_price(risk_off, price_preference_sell).pct_change().fillna(0)
-        benchmark_returns = self._get_price(benchmark, benchmark_preference).pct_change().fillna(0)
-
+        # Convert selected price series to numeric before computing returns
+        risk_on_price = self._get_price(risk_on, price_preference_sell)
+        risk_on_price = pd.to_numeric(risk_on_price, errors="coerce")
+        risk_on_returns = risk_on_price.pct_change().fillna(0)
+        
+        risk_off_price = self._get_price(risk_off, price_preference_sell)
+        risk_off_price = pd.to_numeric(risk_off_price, errors="coerce")
+        risk_off_returns = risk_off_price.pct_change().fillna(0)
+        
+        benchmark_price = self._get_price(benchmark, price_preference_sell)
+        benchmark_price = pd.to_numeric(benchmark_price, errors="coerce")
+        benchmark_returns = benchmark_price.pct_change().fillna(0)
+        
+        
         daily_returns = self._portfolio_returns(allocation, risk_on_returns, risk_off_returns, float(self.config.get("transaction_cost", 0)), float(self.config.get("slippage", 0)))
         equity = (1 + daily_returns).cumprod() * float(self.config.get("initial_capital", 100000))
         benchmark_equity = (1 + benchmark_returns).cumprod() * float(self.config.get("initial_capital", 100000))
