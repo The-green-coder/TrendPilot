@@ -84,7 +84,8 @@ def main() -> None:
     LOGGER.info("Running strategy %s using rule %s", args.strategy, final_config["rule_name"])
     LOGGER.info("Available rules: %s", ", ".join(RULE_REGISTRY.keys()))
 
-    engine = BacktestingEngine(final_config, args.strategy)
+    engine = BacktestingEngine()
+
     result = engine.run(
         risk_on_symbols=risk_on_symbols,
         risk_off_symbols=risk_off_symbols,
