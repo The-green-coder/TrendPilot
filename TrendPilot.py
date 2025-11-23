@@ -1,52 +1,58 @@
-"""CLI entrypoint for TrendPilot backtesting engine."""
-from __future__ import annotations
+"""
+TrendPilot.py
+
+Main CLI entrypoint for TrendPilot backtesting engine.
+Loads strategy config, merges with defaults, loads rule,
+then executes BacktestingEngine.run().
+"""
 
 import argparse
 import csv
 import logging
 import os
-from typing import Dict, List
+from datetime import datetime
 
 from BacktestingEngine import BacktestingEngine
-from MarketData import cleanup_data, parse_period
-from Trends_RuleEngine import RULE_REGISTRY
+from Trends_RuleEngine import get_rule, list_rules
 
-logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+logging.basicConfig(level=logging.INFO)
 LOGGER = logging.getLogger(__name__)
 
 
-def read_config_csv(path: str) -> Dict[str, str]:
+# ---------------------------------------------------------------------
+# Helper: Load CSV into dict
+# ---------------------------------------------------------------------
+def load_csv_as_dict(path: str) -> dict:
     if not os.path.exists(path):
-        raise FileNotFoundError(f"Config file not found: {path}")
-    with open(path, newline="") as csvfile:
-        reader = csv.DictReader(csvfile)
-        return {row["parameter"]: row["value"] for row in reader}
+        return {}
+    with open(path, newline="") as f:
+        reader = csv.reader(f)
+        result = {}
+        for row in reader:
+            if len(row) >= 2:
+                key, value = row[0].strip(), row[1].strip()
+                result[key] = value
+        return result
 
 
-def load_instruments(instrument_path: str, filename: str) -> List[str]:
-    path = os.path.join(instrument_path, filename)
+# ---------------------------------------------------------------------
+# Helper: Load instruments (RiskOn.csv, RiskOff.csv, Benchmark.csv)
+# ---------------------------------------------------------------------
+def load_symbol_list(path: str):
     if not os.path.exists(path):
-        raise FileNotFoundError(f"Instrument file missing: {path}")
-    with open(path, newline="") as csvfile:
-        reader = csv.DictReader(csvfile)
-        symbols = [row["symbol"] for row in reader if row.get("symbol")]
-    if not symbols:
-        raise ValueError(f"No symbols found in {path}")
-    return symbols
+        return []
+    with open(path) as f:
+        return [line.strip() for line in f if line.strip()]
 
 
-def merge_config(default: Dict[str, str], strategy: Dict[str, str], cli_overrides: Dict[str, str]) -> Dict[str, str]:
-    merged = {**default, **strategy}
-    for key, value in cli_overrides.items():
-        if value is not None:
-            merged[key] = value
-    return merged
-
-
-def parse_args() -> argparse.Namespace:
+# ---------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------
+def main():
     parser = argparse.ArgumentParser(description="TrendPilot Backtesting Engine")
-    parser.add_argument("--strategy", default="USTechTripleTrend", help="Strategy folder name inside Strategy_Centre")
-    parser.add_argument("--backtesting_period")
+
+    parser.add_argument("--strategy", required=True, help="Strategy name")
+    parser.add_argument("--backtesting_period", help="Override backtesting period, e.g. 5Y")
     parser.add_argument("--initial_capital")
     parser.add_argument("--transaction_cost")
     parser.add_argument("--slippage")
@@ -55,58 +61,99 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sell_price_preference")
     parser.add_argument("--rule_name")
     parser.add_argument("--delay_between_signal_and_trade")
-    parser.add_argument("--eraseDataAfterRun")
-    parser.add_argument("--benchmark_price_preference")
-    parser.add_argument("--risk_free_rate")
-    parser.add_argument("--data_path")
-    parser.add_argument("--results_path")
-    return parser.parse_args()
+    parser.add_argument("--eraseDataAfterRun", default="No")
 
+    args = parser.parse_args()
 
-def main() -> None:
-    args = parse_args()
-    default_config = read_config_csv("default_config.csv")
+    strategy_name = args.strategy
 
-    strategy_dir = os.path.join("Strategy_Centre", args.strategy)
-    strategy_config_path = os.path.join(strategy_dir, "StrategyConfig.csv")
-    strategy_config = read_config_csv(strategy_config_path)
+    # -----------------------------------------------------------------
+    # Load default config
+    # -----------------------------------------------------------------
+    default_config_path = "default_config.csv"
+    default_config = load_csv_as_dict(default_config_path)
 
-    cli_overrides = {k: v for k, v in vars(args).items() if k != "strategy" and v is not None}
-    final_config = merge_config(default_config, strategy_config, cli_overrides)
+    # -----------------------------------------------------------------
+    # Load strategy config from Strategy_Centre/<strategy>/StrategyConfig.csv
+    # -----------------------------------------------------------------
+    strat_dir = os.path.join("Strategy_Centre", strategy_name)
+    strat_cfg_path = os.path.join(strat_dir, "StrategyConfig.csv")
 
-    instrument_dir = os.path.join(strategy_dir, "Instruments")
-    risk_on_symbols = load_instruments(instrument_dir, "RiskOn.csv")
-    risk_off_symbols = load_instruments(instrument_dir, "RiskOff.csv")
-    benchmark_symbols = load_instruments(instrument_dir, "Benchmark.csv")
+    strat_config = load_csv_as_dict(strat_cfg_path)
 
-    start, end = parse_period(final_config["backtesting_period"])
+    # -----------------------------------------------------------------
+    # Merge: CLI args → strategy config → defaults
+    # -----------------------------------------------------------------
+    final_config = dict(default_config)
+    final_config.update(strat_config)
 
-    LOGGER.info("Running strategy %s using rule %s", args.strategy, final_config["rule_name"])
-    LOGGER.info("Available rules: %s", ", ".join(RULE_REGISTRY.keys()))
+    # APPLY CLI OVERRIDES
+    cli_param_map = {
+        "backtesting_period": args.backtesting_period,
+        "initial_capital": args.initial_capital,
+        "transaction_cost": args.transaction_cost,
+        "slippage": args.slippage,
+        "rebalance_frequency": args.rebalance_frequency,
+        "buy_price_preference": args.buy_price_preference,
+        "sell_price_preference": args.sell_price_preference,
+        "rule_name": args.rule_name,
+        "delay_between_signal_and_trade": args.delay_between_signal_and_trade,
+    }
 
-    engine = BacktestingEngine()
+    for k, v in cli_param_map.items():
+        if v is not None:
+            final_config[k] = v
 
+    # -----------------------------------------------------------------
+    # Load instrument lists
+    # -----------------------------------------------------------------
+    riskon_list = load_symbol_list(os.path.join(strat_dir, "Instruments", "RiskOn.csv"))
+    riskoff_list = load_symbol_list(os.path.join(strat_dir, "Instruments", "RiskOff.csv"))
+    benchmark_list = load_symbol_list(os.path.join(strat_dir, "Instruments", "Benchmark.csv"))
+
+    if not riskon_list or not riskoff_list:
+        raise RuntimeError("RiskOn or RiskOff instruments not configured properly")
+
+    # -----------------------------------------------------------------
+    # Resolve rule function
+    # -----------------------------------------------------------------
+    rule_name = final_config.get("rule_name")
+    if not rule_name:
+        raise RuntimeError("Missing rule_name in strategy config or CLI")
+
+    LOGGER.info(f"Running strategy {strategy_name} using rule {rule_name}")
+    LOGGER.info(f"Available rules: {', '.join(list_rules())}")
+
+    rule = get_rule(rule_name)
+    if rule is None:
+        raise RuntimeError(f"Rule '{rule_name}' not found in Trends_RuleEngine")
+
+    # -----------------------------------------------------------------
+    # Create backtesting engine
+    # -----------------------------------------------------------------
+    engine = BacktestingEngine()  # FIXED — no arguments here
+
+    # -----------------------------------------------------------------
+    # Execute backtest
+    # -----------------------------------------------------------------
     result = engine.run(
-        risk_on_symbols=risk_on_symbols,
-        risk_off_symbols=risk_off_symbols,
-        benchmark_symbols=benchmark_symbols,
-        start=start,
-        end=end,
-        data_path=final_config.get("data_path", "MarketData"),
+        risk_on_symbols=riskon_list,
+        risk_off_symbols=riskoff_list,
+        benchmark_symbols=benchmark_list,
+        rule=rule,   # <<<<<< FIXED — NOW PASSING RULE CORRECTLY
+        rebalance_frequency=final_config["rebalance_frequency"],
+        initial_capital=float(final_config["initial_capital"]),
+        transaction_cost=float(final_config["transaction_cost"]),
+        slippage=float(final_config["slippage"]),
+        backtesting_period=final_config["backtesting_period"],
+        price_preference_buy=final_config["buy_price_preference"],
+        price_preference_sell=final_config["sell_price_preference"],
+        delay=int(final_config["delay_between_signal_and_trade"]),
         results_path=final_config.get("results_path", "ResultsData"),
+        strategy_name=strategy_name,
     )
 
-    LOGGER.info("Backtest completed. Final portfolio value: %.2f", result.performance["final_portfolio_value"].iloc[0])
-    LOGGER.info("Benchmark final value: %.2f", result.performance["benchmark_final_value"].iloc[0])
-
-    erase_after = final_config.get("eraseDataAfterRun", "No").lower() == "yes"
-    if erase_after:
-        LOGGER.info("eraseDataAfterRun enabled; cleaning up data and results.")
-        cleanup_data(risk_on_symbols + risk_off_symbols + benchmark_symbols, final_config.get("data_path", "MarketData"))
-        strategy_results_path = os.path.join(final_config.get("results_path", "ResultsData"), args.strategy)
-        if os.path.exists(strategy_results_path):
-            for filename in os.listdir(strategy_results_path):
-                os.remove(os.path.join(strategy_results_path, filename))
+    LOGGER.info("Backtest completed. Results saved in ResultsData/%s", strategy_name)
 
 
 if __name__ == "__main__":
