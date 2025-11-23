@@ -16,8 +16,8 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime, date, timedelta
-from typing import Dict, Iterable, List, Mapping, Sequence
+from datetime import date, datetime
+from typing import Dict, Sequence
 
 import numpy as np
 import pandas as pd
@@ -29,16 +29,11 @@ LOGGER.setLevel(logging.INFO)
 
 
 # ---------------------------------------------------------------------------
-# Helper dataclasses
+# Helper dataclass
 # ---------------------------------------------------------------------------
-
 
 @dataclass
 class BacktestResult:
-    """
-    Container for key backtest outputs returned by BacktestingEngine.run().
-    """
-
     performance_stats: pd.DataFrame
     risk_stats: pd.DataFrame
     allocation_series: pd.Series
@@ -50,21 +45,19 @@ class BacktestResult:
 
 
 # ---------------------------------------------------------------------------
-# Utility functions
+# Helper functions
 # ---------------------------------------------------------------------------
-
 
 def _parse_backtesting_period(period: str) -> (date, date):
     """
-    Parse a backtesting period string like "3M", "6M", "1Y", "5Y" into
-    (start_date, end_date). End date is "today".
+    Parse backtesting period like '3M', '6M', '1Y', '5Y' into (start_date, end_date).
+    End date is today.
     """
-    period = period.strip().upper()
+    period = (period or "").strip().upper()
     today = date.today()
 
     if period.endswith("M"):
         months = int(period[:-1])
-        # naive month subtraction for backtest purposes
         year_delta = months // 12
         month_delta = months % 12
         start_year = today.year - year_delta
@@ -72,14 +65,13 @@ def _parse_backtesting_period(period: str) -> (date, date):
         while start_month <= 0:
             start_year -= 1
             start_month += 12
-        start_day = min(today.day, 28)  # keep it simple
+        start_day = min(today.day, 28)
         start = date(start_year, start_month, start_day)
     elif period.endswith("Y"):
         years = int(period[:-1])
         start = date(today.year - years, today.month, today.day)
     else:
-        # fallback: 5Y
-        LOGGER.warning("Unrecognised backtesting_period '%s', falling back to 5Y", period)
+        LOGGER.warning("Unrecognised backtesting_period '%s', defaulting to 5Y", period)
         start = date(today.year - 5, today.month, today.day)
 
     return start, today
@@ -87,14 +79,7 @@ def _parse_backtesting_period(period: str) -> (date, date):
 
 def _map_rebalance_frequency(freq: str) -> str:
     """
-    Map human-readable rebalance frequency to pandas offset alias.
-
-    Supported examples:
-    - Daily
-    - Weekly
-    - Monthly
-    - Quarterly
-    - Yearly
+    Map human-readable rebalance frequency to pandas resample alias.
     """
     freq = (freq or "").strip().lower()
     if freq in ("daily", "day", "d"):
@@ -119,8 +104,7 @@ def _map_rebalance_frequency(freq: str) -> str:
 
 def _select_price_column(df: pd.DataFrame, preference: str) -> pd.Series:
     """
-    Select a price column from OHLCV DataFrame given a preference string.
-    Supported preferences: open, high, low, close, average.
+    Select OHLC price series according to preference: open, high, low, close, average.
     """
     preference = (preference or "close").strip().lower()
 
@@ -131,44 +115,36 @@ def _select_price_column(df: pd.DataFrame, preference: str) -> pd.Series:
     elif preference == "low":
         col = "low"
     elif preference == "average":
-        # average of OHLC if all are available; fallback to close
         required = {"open", "high", "low", "close"}
-        if required.issubset(set(df.columns)):
+        if required.issubset(df.columns):
             return df[["open", "high", "low", "close"]].mean(axis=1)
         col = "close"
     else:
         col = "close"
 
     if col not in df.columns:
-        raise KeyError(f"Price column '{col}' not found in DataFrame columns {df.columns}")
+        raise KeyError(f"Price column '{col}' not found in {df.columns}")
 
     return df[col]
 
 
 # ---------------------------------------------------------------------------
-# Backtesting engine implementation
+# Backtesting engine
 # ---------------------------------------------------------------------------
-
 
 class BacktestingEngine:
     """
     Main backtesting engine.
-
-    The API is deliberately flexible: `run` accepts a **config dict via
-    keyword arguments**, so TrendPilot.py can evolve without breaking this
-    module.
     """
 
     def __init__(self) -> None:
         pass
 
-    # ----- risk helpers -----------------------------------------------------
+    # ---- risk helpers -----------------------------------------------------
 
     def _sharpe(self, daily_returns: pd.Series, risk_free_rate: float = 0.0) -> float:
         """
-        Compute annualised Sharpe ratio from daily returns.
-
-        - daily_returns: Series of daily strategy or benchmark returns
+        Annualised Sharpe ratio from daily returns.
         """
         if isinstance(daily_returns, pd.DataFrame):
             if daily_returns.shape[1] == 0:
@@ -179,15 +155,13 @@ class BacktestingEngine:
 
         excess = series - risk_free_rate / 252.0
         std = excess.std()
-
         if std is None or np.isnan(std) or std == 0:
             return float("nan")
-
         return float(np.sqrt(252.0) * excess.mean() / std)
 
     def _max_drawdown(self, values: pd.Series) -> float:
         """
-        Compute max drawdown (as a negative number, e.g. -0.35 for -35%).
+        Max drawdown as a negative number (e.g. -0.35 == -35%).
         """
         running_max = values.cummax()
         dd = values / running_max - 1.0
@@ -195,21 +169,19 @@ class BacktestingEngine:
 
     def _apply_delay(self, allocation: pd.Series, delay: int) -> pd.Series:
         """
-        Apply a delay (in trading days) between signal and actual trade.
+        Apply a delay in trading days between signal and execution.
         """
         delay = int(delay or 0)
         if delay <= 0:
             return allocation
-        # Shift weights forward in time; back-fill initial gap
         return allocation.shift(delay).bfill()
 
-    # ----- core public API --------------------------------------------------
+    # ---- main API ---------------------------------------------------------
 
     def run(self, **config) -> BacktestResult:
         """
-        Run a backtest with flexible configuration.
+        Run a backtest. Expected config keys:
 
-        Expected keys in `config` (all passed as keyword arguments):
         - risk_on_symbols: List[str]
         - risk_off_symbols: List[str]
         - benchmark_symbols: List[str]
@@ -218,24 +190,23 @@ class BacktestingEngine:
         - initial_capital: float
         - transaction_cost: float (percent per trade)
         - slippage: float (percent per trade)
-        - backtesting_period: str like "5Y", "3M"
+        - backtesting_period: str
         - price_preference_buy: str
         - price_preference_sell: str
-        - delay: int (days between signal and trade)
-        - results_path: base directory for ResultsData (default "ResultsData")
-        - strategy_name or strategy: used for subfolder name
-        - risk_free_rate: float, optional (annualised)
+        - delay: int
+        - results_path: str
+        - strategy_name: str
+        - risk_free_rate: float (optional)
         """
-
-        # ---- unpack config with sensible defaults -------------------------
         risk_on_symbols: Sequence[str] = config["risk_on_symbols"]
         risk_off_symbols: Sequence[str] = config["risk_off_symbols"]
         benchmark_symbols: Sequence[str] = config["benchmark_symbols"]
         rule = config["rule"]
+
         rebalance_frequency: str = config["rebalance_frequency"]
         initial_capital: float = float(config["initial_capital"])
-        transaction_cost_pct: float = float(config["transaction_cost"])  # e.g. 0.1 means 0.1%
-        slippage_pct: float = float(config["slippage"])  # e.g. 0.05 means 0.05%
+        transaction_cost_pct: float = float(config["transaction_cost"])
+        slippage_pct: float = float(config["slippage"])
         backtesting_period: str = config["backtesting_period"]
         price_preference_buy: str = config["price_preference_buy"]
         price_preference_sell: str = config["price_preference_sell"]
@@ -257,11 +228,9 @@ class BacktestingEngine:
         )
 
         # ---- load market data --------------------------------------------
-        all_symbols = sorted(
-            set(risk_on_symbols) | set(risk_off_symbols) | set(benchmark_symbols)
-        )
-
+        all_symbols = sorted(set(risk_on_symbols) | set(risk_off_symbols) | set(benchmark_symbols))
         data_path = config.get("data_path", "MarketData")
+
         data: Dict[str, pd.DataFrame] = load_market_data(
             symbols=all_symbols,
             start=start_date,
@@ -270,17 +239,15 @@ class BacktestingEngine:
             refresh=False,
         )
 
-        # Ensure indices are DateTimeIndex and aligned
+        # normalise indices
         for sym, df in data.items():
             if not isinstance(df.index, pd.DatetimeIndex):
                 df.index = pd.to_datetime(df.index)
 
-        # Common index across all symbols
+        # find common index
         common_index = None
         for df in data.values():
-            common_index = df.index if common_index is None else common_index.intersection(
-                df.index
-            )
+            common_index = df.index if common_index is None else common_index.intersection(df.index)
 
         if common_index is None or len(common_index) == 0:
             raise RuntimeError("No overlapping dates across instruments for backtest")
@@ -289,7 +256,7 @@ class BacktestingEngine:
         for sym in all_symbols:
             data[sym] = data[sym].reindex(common_index).ffill().bfill()
 
-        # ---- pick specific instruments -----------------------------------
+        # pick primary instruments (single symbol for now)
         risk_on = risk_on_symbols[0]
         risk_off = risk_off_symbols[0]
         benchmark = benchmark_symbols[0]
@@ -298,52 +265,24 @@ class BacktestingEngine:
         risk_off_df = data[risk_off]
         benchmark_df = data[benchmark]
 
-        # ---- build signal price series -----------------------------------
-        signal_price_series = _select_price_column(risk_on_df, price_preference_buy).astype(
-            float
-        )
+        # ---- signal prices & rule ----------------------------------------
+        signal_price_series = _select_price_column(risk_on_df, price_preference_buy).astype(float)
 
-        # ---- compute allocation from rule (0..1 risk-on) -----------------
+        # ensure rule output is a Series aligned to common_index
         raw_allocation = rule(signal_price_series)
+        raw_allocation = pd.Series(raw_allocation, index=signal_price_series.index)
         raw_allocation = raw_allocation.reindex(common_index).astype(float)
-        # Clip to [0, 1]
-        raw_allocation = raw_allocation.clip(lower=0.0, upper=1.0)
-        # Fill any missing values
-        raw_allocation = raw_allocation.ffill().bfill().fillna(0.0)
+        raw_allocation = raw_allocation.clip(0.0, 1.0).ffill().bfill().fillna(0.0)
 
-        # ---- apply rebalance frequency -----------------------------------
-        # Take allocation only at rebalance dates, then forward-fill.
-   
-        # ---- apply rebalance frequency with trading-day alignment ----
-        # Generate raw rebalance dates (may fall on weekends)
-        rebalance_dates = raw_allocation.resample(rebalance_alias).first().index
-        
-        # Align each rebalance date to the nearest previous trading date
-        aligned_rebalance_dates = []
-        for dt in rebalance_dates:
-            if dt in raw_allocation.index:
-                aligned_rebalance_dates.append(dt)
-            else:
-                # find nearest earlier trading day
-                earlier = raw_allocation.index[raw_allocation.index <= dt]
-                if len(earlier) > 0:
-                    aligned_rebalance_dates.append(earlier[-1])
-        
-        aligned_rebalance_dates = pd.DatetimeIndex(aligned_rebalance_dates).unique()
-        
-        # Build rebalanced allocation series
-        allocation_rebalanced = pd.Series(index=raw_allocation.index, dtype=float)
-        allocation_rebalanced[:] = float("nan")
-        allocation_rebalanced.loc[aligned_rebalance_dates] = raw_allocation.loc[aligned_rebalance_dates]
-        
-        # Forward-fill between rebalances
-        allocation_rebalanced = allocation_rebalanced.ffill().bfill()
+        # ---- rebalance using resample (no manual .loc) -------------------
+        # resample to rebalance frequency (e.g. weekly), then forward-fill
+        allocation_resampled = raw_allocation.resample(rebalance_alias).first()
+        allocation_rebalanced = allocation_resampled.reindex(common_index, method="ffill").bfill()
 
-
-        # ---- apply delay between signal and trade ------------------------
+        # ---- apply delay --------------------------------------------------
         allocation = self._apply_delay(allocation_rebalanced, delay)
 
-        # ---- compute returns for instruments -----------------------------
+        # ---- compute returns ---------------------------------------------
         def _price_series(df: pd.DataFrame) -> pd.Series:
             return _select_price_column(df, price_preference_sell).astype(float)
 
@@ -355,18 +294,15 @@ class BacktestingEngine:
         risk_off_returns = risk_off_price.pct_change().fillna(0.0)
         benchmark_returns = benchmark_price.pct_change().fillna(0.0)
 
-        # ---- portfolio daily returns (before costs) ----------------------
         portfolio_returns = allocation * risk_on_returns + (1.0 - allocation) * risk_off_returns
 
-        # ---- transaction cost & slippage model ---------------------------
-        # Simple model: cost proportional to turnover in allocation
+        # costs
         turnover = allocation.diff().abs().fillna(0.0)
         cost_perc = (transaction_cost_pct + slippage_pct) / 100.0
         trading_costs = turnover * cost_perc
-
         net_returns = portfolio_returns - trading_costs
 
-        # ---- equity curves -----------------------------------------------
+        # equity curves
         portfolio_values = (1.0 + net_returns).cumprod() * initial_capital
         benchmark_values = (1.0 + benchmark_returns).cumprod() * initial_capital
 
@@ -376,19 +312,13 @@ class BacktestingEngine:
         LOGGER.info("Backtest completed. Final portfolio value: %.2f", final_portfolio_value)
         LOGGER.info("Benchmark final value: %.2f", final_benchmark_value)
 
-        # ------------------------------------------------------------------
-        # Allocation time statistics
-        # ------------------------------------------------------------------
+        # ---- allocation time stats ---------------------------------------
         avg_risk_on_alloc_pct = float(allocation.mean() * 100.0)
         avg_risk_off_alloc_pct = 100.0 - avg_risk_on_alloc_pct
-
-        # % of days with any risk-on allocation and full risk-off allocation
         time_any_risk_on_pct = float((allocation > 0.0).mean() * 100.0)
         time_full_risk_off_pct = float((allocation == 0.0).mean() * 100.0)
 
-        # ------------------------------------------------------------------
-        # Performance contribution attribution
-        # ------------------------------------------------------------------
+        # ---- performance contribution ------------------------------------
         risk_on_leg = allocation * risk_on_returns
         risk_off_leg = (1.0 - allocation) * risk_off_returns
 
@@ -400,9 +330,15 @@ class BacktestingEngine:
             risk_on_contrib_pct = float("nan")
             risk_off_contrib_pct = float("nan")
 
-        # ------------------------------------------------------------------
-        # Risk statistics vs benchmark
-        # ------------------------------------------------------------------
+        # standalone asset returns (for intuition)
+        risk_on_total_return_pct = float(
+            (risk_on_price.iloc[-1] / risk_on_price.iloc[0] - 1.0) * 100.0
+        )
+        risk_off_total_return_pct = float(
+            (risk_off_price.iloc[-1] / risk_off_price.iloc[0] - 1.0) * 100.0
+        )
+
+        # ---- risk metrics -------------------------------------------------
         daily_portfolio_returns = portfolio_values.pct_change().fillna(0.0)
         daily_benchmark_returns = benchmark_values.pct_change().fillna(0.0)
 
@@ -415,11 +351,8 @@ class BacktestingEngine:
         vol_strategy = float(daily_portfolio_returns.std() * np.sqrt(252.0))
         vol_benchmark = float(daily_benchmark_returns.std() * np.sqrt(252.0))
 
-        # ------------------------------------------------------------------
-        # Build CSV outputs
-        # ------------------------------------------------------------------
+        # ---- CSV outputs --------------------------------------------------
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
         results_root = results_path or "ResultsData"
         strategy_dir = os.path.join(results_root, strategy_name)
         os.makedirs(strategy_dir, exist_ok=True)
@@ -443,6 +376,8 @@ class BacktestingEngine:
                 "time_full_risk_off_pct": [time_full_risk_off_pct],
                 "risk_on_contrib_pct": [risk_on_contrib_pct],
                 "risk_off_contrib_pct": [risk_off_contrib_pct],
+                "risk_on_total_return_pct": [risk_on_total_return_pct],
+                "risk_off_total_return_pct": [risk_off_total_return_pct],
             }
         )
 
@@ -457,7 +392,6 @@ class BacktestingEngine:
             }
         )
 
-        # Allocation & equity path over time
         allocation_df = pd.DataFrame(
             {
                 "date": common_index,
@@ -479,7 +413,6 @@ class BacktestingEngine:
         risk_stats.to_csv(risk_path, index=False)
         allocation_df.to_csv(alloc_path, index=False)
 
-        # Log summary to console
         LOGGER.info(
             "Average allocation: %.2f%% Risk-On, %.2f%% Risk-Off",
             avg_risk_on_alloc_pct,
@@ -489,6 +422,11 @@ class BacktestingEngine:
             "Return contribution: %.2f%% from Risk-On, %.2f%% from Risk-Off",
             risk_on_contrib_pct,
             risk_off_contrib_pct,
+        )
+        LOGGER.info(
+            "Standalone asset returns: Risk-On %.2f%%, Risk-Off %.2f%%",
+            risk_on_total_return_pct,
+            risk_off_total_return_pct,
         )
         LOGGER.info(
             "Strategy Sharpe: %.3f vs Benchmark Sharpe: %.3f",
