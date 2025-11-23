@@ -3,13 +3,7 @@ from __future__ import annotations
 
 from typing import Callable, Dict
 
-import importlib.util
-
-_pandas_spec = importlib.util.find_spec("pandas")
-if _pandas_spec:
-    import pandas as pd  # type: ignore
-else:  # pragma: no cover - offline fallback
-    import pandas_stub as pd  # type: ignore
+import pandas as pd
 
 
 def _moving_average_allocations(price_series: pd.Series, windows_with_weights) -> pd.Series:

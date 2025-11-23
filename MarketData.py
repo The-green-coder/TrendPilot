@@ -7,28 +7,17 @@ in offline environments.
 """
 from __future__ import annotations
 
-import importlib.util
 import logging
 import os
 from datetime import datetime, timedelta
 from typing import Dict, Iterable, Tuple
 
-_numpy_spec = importlib.util.find_spec("numpy")
-if _numpy_spec:
-    import numpy as np  # type: ignore
-else:  # pragma: no cover - offline fallback
-    import numpy_stub as np  # type: ignore
+import numpy as np
+import pandas as pd
 
-_pandas_spec = importlib.util.find_spec("pandas")
-if _pandas_spec:
-    import pandas as pd  # type: ignore
-else:  # pragma: no cover - offline fallback
-    import pandas_stub as pd  # type: ignore
-
-_yfinance_spec = importlib.util.find_spec("yfinance")
-if _yfinance_spec:  # pragma: no cover - optional dependency
-    import yfinance as yf  # type: ignore
-else:  # pragma: no cover - fallback when yfinance is missing
+try:  # pragma: no cover - optional dependency
+    import yfinance as yf
+except Exception:  # pragma: no cover - fallback when yfinance is missing
     yf = None  # type: ignore
 
 
