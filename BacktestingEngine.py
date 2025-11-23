@@ -11,6 +11,8 @@ from typing import Dict, Iterable
 
 import numpy as np
 import pandas as pd
+import logging
+
 
 from MarketData import load_market_data
 from Trends_RuleEngine import get_rule
