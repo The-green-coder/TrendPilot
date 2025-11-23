@@ -97,17 +97,6 @@ def main() -> None:
 
     LOGGER.info("Backtest completed. Final portfolio value: %.2f", result.performance["final_portfolio_value"].iloc[0])
     LOGGER.info("Benchmark final value: %.2f", result.performance["benchmark_final_value"].iloc[0])
-    LOGGER.info(
-        "Time in market - Risk On: %.2f%% | Risk Off: %.2f%%",
-        result.performance["risk_on_time_pct"].iloc[0],
-        result.performance["risk_off_time_pct"].iloc[0],
-    )
-    LOGGER.info(
-        "Contribution (%% of total) - Risk On: %.2f%% | Risk Off: %.2f%% | Costs: %.2f%%",
-        result.performance["risk_on_contribution_pct_of_total"].iloc[0],
-        result.performance["risk_off_contribution_pct_of_total"].iloc[0],
-        result.performance["transaction_cost_pct_of_total"].iloc[0],
-    )
 
     erase_after = final_config.get("eraseDataAfterRun", "No").lower() == "yes"
     if erase_after:

@@ -29,7 +29,4 @@ Launch the dashboard after running a backtest:
 python Dashboard.py
 ```
 
-If network access is unavailable, market data is simulated to keep the workflow operational. Performance outputs now include time-in-market percentages for Risk On/Risk Off, contribution breakdowns by leg and trading costs, and risk metrics that are benchmark-aware (volatility, max drawdown, Sharpe).
-
-### Dependencies and offline mode
-The codebase is designed to run even in isolated environments where installing external Python packages is not possible. Lightweight drop-in stubs (`pandas_stub.py` and `numpy_stub.py`) live in the repository so the CLI backtest can execute without fetching wheels from the internet. When full libraries are available they can be installed normally and will be preferred.
+If network access is unavailable, market data is simulated to keep the workflow operational.
