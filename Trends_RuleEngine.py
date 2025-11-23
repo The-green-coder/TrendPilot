@@ -1,64 +1,116 @@
-"""Rule engine implementing trend-following allocation logic."""
-from __future__ import annotations
+"""
+Trends_RuleEngine.py
 
-from typing import Callable, Dict
+Defines trend-following rules used by TrendPilot.
+
+Each rule must be a function that takes a price series (pd.Series)
+and returns an allocation series (0..1 for risk-on %).
+
+We expose:
+ - get_rule(rule_name)
+ - list_rules()
+"""
 
 import pandas as pd
 
-def _moving_average_allocations(price_series, windows_and_weights):
+# -----------------------------------------------------------
+# Helper: generic moving average allocation engine
+# -----------------------------------------------------------
+
+def _moving_average_allocations(price_series: pd.Series, ma_weights):
     """
-    Generic helper to build an allocation series from:
-    - price_series: time series of prices
-    - windows_and_weights: list of (window, weight) tuples
+    Compute weighted allocation based on price above/below specific MAs.
 
-    It returns a series of allocation to RISK-ON (0.0 .. 1.0).
-    Any non-numeric values in price_series are coerced to NaN.
+    ma_weights = list of tuples: [(window, weight), ...]
+
+    Returns a Series of values in [0,1].
     """
+    price_series = price_series.astype(float)
+    alloc = pd.Series(0.0, index=price_series.index)
 
-    # Ensure we are working with a 1D numeric Series
-    if isinstance(price_series, pd.DataFrame):
-        # Use the first column if a DataFrame is passed
-        price_series = price_series.iloc[:, 0]
+    for window, weight in ma_weights:
+        ma = price_series.rolling(window=window).mean()
+        cond = price_series > ma
+        alloc = alloc + weight * cond.astype(float)
 
-    # Coerce to numeric – strings like "qqq" become NaN
-    price_series = pd.to_numeric(price_series, errors="coerce")
+    # ensure no NaN at start → backfill
+    return alloc.fillna(0.0)
 
-    allocations = pd.Series(0.0, index=price_series.index)
 
-    for window, weight in windows_and_weights:
-        # Require full window before using the MA
-        ma = price_series.rolling(window=window, min_periods=window).mean()
-
-        # 1.0 when price > MA (risk-on), 0.0 otherwise (risk-off)
-        signal = (price_series > ma).astype(float)
-
-        # Combine weighted signals
-        allocations = allocations.add(weight * signal, fill_value=0.0)
-
-    return allocations
-
+# -----------------------------------------------------------
+# Rule 1 – Original TripleTrend
+# -----------------------------------------------------------
 
 def triple_trend(price_series: pd.Series) -> pd.Series:
-    return _moving_average_allocations(price_series, [(50, 0.5), (75, 0.25), (100, 0.25)])
+    """
+    TripleTrend rule:
+    - 50% weight to 50-day MA
+    - 25% weight to 75-day MA
+    - 25% weight to 100-day MA
+    """
+    return _moving_average_allocations(
+        price_series,
+        [(50, 0.50), (75, 0.25), (100, 0.25)]
+    )
 
+
+# -----------------------------------------------------------
+# Rule 2 – TripleTrend_QuickerResponse1
+# -----------------------------------------------------------
 
 def triple_trend_quicker_response_1(price_series: pd.Series) -> pd.Series:
-    return _moving_average_allocations(price_series, [(25, 0.25), (50, 0.5), (100, 0.25)])
+    """
+    A more aggressive triple trend:
+    - 25% weight to 25-day MA
+    - 50% weight to 50-day MA
+    - 25% weight to 100-day MA
+    """
+    return _moving_average_allocations(
+        price_series,
+        [(25, 0.25), (50, 0.50), (100, 0.25)]
+    )
 
+
+# -----------------------------------------------------------
+# Rule 3 – TripleTrend_QuickerResponse2
+# -----------------------------------------------------------
 
 def triple_trend_quicker_response_2(price_series: pd.Series) -> pd.Series:
-    return _moving_average_allocations(price_series, [(20, 0.5), (50, 0.25), (100, 0.25)])
+    """
+    Another variation:
+    - 50% weight to 20-day MA
+    - 25% weight to 50-day MA
+    - 25% weight to 100-day MA
+    """
+    return _moving_average_allocations(
+        price_series,
+        [(20, 0.50), (50, 0.25), (100, 0.25)]
+    )
 
 
-RULE_REGISTRY: Dict[str, Callable[[pd.Series], pd.Series]] = {
+# -----------------------------------------------------------
+# Rule Registry
+# -----------------------------------------------------------
+
+_RULES = {
     "TRIPLETREND": triple_trend,
     "TRIPLETREND_QUICKERRESPONSE1": triple_trend_quicker_response_1,
     "TRIPLETREND_QUICKERRESPONSE2": triple_trend_quicker_response_2,
 }
 
 
-def get_rule(rule_name: str) -> Callable[[pd.Series], pd.Series]:
-    key = rule_name.upper()
-    if key not in RULE_REGISTRY:
-        raise KeyError(f"Rule '{rule_name}' is not registered. Available: {', '.join(RULE_REGISTRY)}")
-    return RULE_REGISTRY[key]
+def get_rule(name: str):
+    """
+    Return the rule function by name (case-insensitive).
+    """
+    if not name:
+        return None
+    key = name.strip().upper()
+    return _RULES.get(key)
+
+
+def list_rules():
+    """
+    Return all rule names in the registry.
+    """
+    return list(_RULES.keys())
