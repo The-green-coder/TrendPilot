@@ -1,0 +1,2 @@
+# TrendPilot
+Rules based engine
