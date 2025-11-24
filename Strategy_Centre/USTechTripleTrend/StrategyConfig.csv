@@ -12,3 +12,4 @@ backtesting_period,5Y
 eraseDataAfterRun,No
 benchmark_price_preference,close
 risk_free_rate,0.01
+record_backtest_details,No
