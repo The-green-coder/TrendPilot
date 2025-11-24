@@ -19,8 +19,16 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Dict, Sequence
 
-import numpy as np
-import pandas as pd
+# Prefer real numpy/pandas; fall back to lightweight stubs for offline environments
+try:  # pragma: no cover
+    import numpy as np  # type: ignore
+except Exception:  # pragma: no cover
+    import numpy_stub as np  # type: ignore
+
+try:  # pragma: no cover
+    import pandas as pd  # type: ignore
+except Exception:  # pragma: no cover
+    import pandas_stub as pd  # type: ignore
 
 from MarketData import load_market_data
 
@@ -404,11 +412,13 @@ class BacktestingEngine:
             }
         )
 
+        risk_off_alloc = 1.0 - allocation
+
         allocation_df = pd.DataFrame(
             {
                 "date": common_index,
                 "allocation_risk_on": allocation.values,
-                "allocation_risk_off": 1.0 - allocation.values,
+                "allocation_risk_off": risk_off_alloc.values,
                 "portfolio_value": portfolio_values.values,
                 "benchmark_value": benchmark_values.values,
                 "risk_on_price": risk_on_price.values,
@@ -572,6 +582,70 @@ class BacktestingEngine:
             max_dd_strategy * 100.0,
             max_dd_benchmark * 100.0,
         )
+
+        strategy_perf_table = pd.DataFrame(
+            {
+                "Metric": [
+                    "Final Portfolio Value",
+                    "Total Return %",
+                    "Avg Risk-On Alloc %",
+                    "Avg Risk-Off Alloc %",
+                    "Time Any Risk-On %",
+                    "Time Full Risk-Off %",
+                    "Risk-On Contribution %",
+                    "Risk-Off Contribution %",
+                ],
+                "Value": [
+                    round(final_portfolio_value, 2),
+                    round(performance_stats["total_return_pct"].iloc[0], 2),
+                    round(avg_risk_on_alloc_pct, 2),
+                    round(avg_risk_off_alloc_pct, 2),
+                    round(time_any_risk_on_pct, 2),
+                    round(time_full_risk_off_pct, 2),
+                    round(risk_on_contrib_pct, 2),
+                    round(risk_off_contrib_pct, 2),
+                ],
+            }
+        )
+
+        comparison_table = pd.DataFrame(
+            {
+                "Metric": ["Final Value", "Total Return %"],
+                "Strategy": [
+                    round(final_portfolio_value, 2),
+                    round(performance_stats["total_return_pct"].iloc[0], 2),
+                ],
+                "Benchmark": [
+                    round(final_benchmark_value, 2),
+                    round(performance_stats["benchmark_return_pct"].iloc[0], 2),
+                ],
+            }
+        )
+
+        risk_table = pd.DataFrame(
+            {
+                "Metric": ["Sharpe", "Volatility", "Max Drawdown %"],
+                "Strategy": [
+                    round(risk_stats["sharpe_strategy"].iloc[0], 3),
+                    round(risk_stats["vol_strategy"].iloc[0], 4),
+                    round(risk_stats["max_drawdown_strategy"].iloc[0] * 100.0, 2),
+                ],
+                "Benchmark": [
+                    round(risk_stats["sharpe_benchmark"].iloc[0], 3),
+                    round(risk_stats["vol_benchmark"].iloc[0], 4),
+                    round(risk_stats["max_drawdown_benchmark"].iloc[0] * 100.0, 2),
+                ],
+            }
+        )
+
+        print("\nStrategy Performance Summary")
+        print(strategy_perf_table.to_string(index=False))
+
+        print("\nStrategy vs Benchmark")
+        print(comparison_table.to_string(index=False))
+
+        print("\nRisk Statistics")
+        print(risk_table.to_string(index=False))
 
         return BacktestResult(
             performance_stats=performance_stats,
