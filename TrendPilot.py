@@ -11,8 +11,10 @@ import csv
 import logging
 import os
 from datetime import datetime
+import shutil
 
 from BacktestingEngine import BacktestingEngine
+from MarketData import cleanup_data
 from Trends_RuleEngine import get_rule, list_rules
 
 logging.basicConfig(level=logging.INFO)
@@ -62,6 +64,7 @@ def main():
     parser.add_argument("--rule_name")
     parser.add_argument("--delay_between_signal_and_trade")
     parser.add_argument("--eraseDataAfterRun", default="No")
+    parser.add_argument("--record_backtest_details")
 
     args = parser.parse_args()
 
@@ -98,6 +101,8 @@ def main():
         "sell_price_preference": args.sell_price_preference,
         "rule_name": args.rule_name,
         "delay_between_signal_and_trade": args.delay_between_signal_and_trade,
+        "record_backtest_details": args.record_backtest_details,
+        "eraseDataAfterRun": args.eraseDataAfterRun,
     }
 
     for k, v in cli_param_map.items():
@@ -151,9 +156,21 @@ def main():
         delay=int(final_config["delay_between_signal_and_trade"]),
         results_path=final_config.get("results_path", "ResultsData"),
         strategy_name=strategy_name,
+        record_backtest_details=final_config.get("record_backtest_details", "No"),
     )
 
     LOGGER.info("Backtest completed. Results saved in ResultsData/%s", strategy_name)
+
+    erase_after_run = str(final_config.get("eraseDataAfterRun", "No")).strip().lower()
+    if erase_after_run == "yes":
+        data_path = final_config.get("data_path", "MarketData")
+        cleanup_data(riskon_list + riskoff_list + benchmark_list, data_path)
+
+        results_root = final_config.get("results_path", "ResultsData")
+        strategy_results_dir = os.path.join(results_root, strategy_name)
+        if os.path.isdir(strategy_results_dir):
+            shutil.rmtree(strategy_results_dir)
+        LOGGER.info("Data erased after run as requested")
 
 
 if __name__ == "__main__":
