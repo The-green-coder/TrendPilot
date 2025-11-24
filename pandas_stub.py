@@ -4,11 +4,45 @@ from __future__ import annotations
 import csv
 import math
 from datetime import datetime, timedelta
-from typing import Dict, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional
 
 
-def date_range(start: datetime, end: datetime, freq: str = "D") -> List[datetime]:
-    days = []
+class DatetimeIndex(list):
+    def intersection(self, other: Iterable):
+        other_set = set(other)
+        return DatetimeIndex([dt for dt in self if dt in other_set])
+
+    def sort_values(self):
+        return DatetimeIndex(sorted(self))
+
+
+def to_datetime(values: Iterable) -> DatetimeIndex:
+    converted = []
+    for v in values:
+        if isinstance(v, datetime):
+            converted.append(v)
+        else:
+            converted.append(datetime.fromisoformat(str(v)))
+    return DatetimeIndex(converted)
+
+
+def to_numeric(values: Iterable, errors: str = "raise"):
+    try:
+        return Series([float(v) if v is not None else math.nan for v in values])
+    except Exception:
+        if errors == "coerce":
+            coerced = []
+            for v in values:
+                try:
+                    coerced.append(float(v))
+                except Exception:
+                    coerced.append(math.nan)
+            return Series(coerced)
+        raise
+
+
+def date_range(start: datetime, end: datetime, freq: str = "D") -> DatetimeIndex:
+    days: List[datetime] = []
     current = start
     while current <= end:
         if freq == "B":
@@ -17,21 +51,31 @@ def date_range(start: datetime, end: datetime, freq: str = "D") -> List[datetime
         else:
             days.append(current)
         current += timedelta(days=1)
-    return days
+    return DatetimeIndex(days)
 
 
 class Series:
     def __init__(self, data: Iterable, index: Optional[List] = None):
-        self.data = list(data)
+        if index is not None and not hasattr(data, "__iter__"):
+            self.data = [data] * len(index)
+        elif isinstance(data, (float, int)) and index is not None:
+            self.data = [data] * len(index)
+        else:
+            self.data = list(data)
         self.index = list(index) if index is not None else list(range(len(self.data)))
         if len(self.data) != len(self.index):
             raise ValueError("Data and index must be the same length")
+        self.name = None
 
     def __len__(self):
         return len(self.data)
 
     def __iter__(self):
         return iter(self.data)
+
+    @property
+    def values(self):
+        return self.data
 
     def __add__(self, other):
         if isinstance(other, Series):
@@ -67,6 +111,11 @@ class Series:
             return Series([1.0 if a > b else 0.0 for a, b in zip(self.data, other.data)], self.index)
         return Series([1.0 if a > other else 0.0 for a in self.data], self.index)
 
+    def __eq__(self, other):
+        if isinstance(other, Series):
+            return Series([1.0 if a == b else 0.0 for a, b in zip(self.data, other.data)], self.index)
+        return Series([1.0 if a == other else 0.0 for a in self.data], self.index)
+
     def astype(self, _type):
         if _type is float:
             return Series([float(x) if x is not None else math.nan for x in self.data], self.index)
@@ -101,15 +150,33 @@ class Series:
         series = self
 
         class Resampler:
+            def first(self_nonself):
+                return series
+
             def last(self_nonself):
                 return series
 
         return Resampler()
 
-    def reindex(self, new_index: List):
+    def reindex(self, new_index: List, method: Optional[str] = None):
         mapping = {idx: val for idx, val in zip(self.index, self.data)}
-        values = [mapping.get(idx, None) for idx in new_index]
-        return Series(values, new_index)
+        values = []
+        last = None
+        for idx in new_index:
+            if idx in mapping:
+                last = mapping[idx]
+                values.append(last)
+            else:
+                if method == "ffill":
+                    values.append(last)
+                elif method == "bfill":
+                    values.append(None)
+                else:
+                    values.append(None)
+        series = Series(values, new_index)
+        if method == "bfill":
+            series = series.bfill()
+        return series
 
     def ffill(self):
         filled = []
@@ -122,6 +189,9 @@ class Series:
                 last = val
         return Series(filled, self.index)
 
+    def bfill(self):
+        return self.fillna(method="bfill")
+
     def fillna(self, value=None, method: Optional[str] = None):
         filled = self.data[:]
         if method == "bfill":
@@ -131,6 +201,13 @@ class Series:
                     filled[i] = next_val
                 else:
                     next_val = filled[i]
+        elif method == "ffill":
+            last_val = None
+            for i in range(len(filled)):
+                if filled[i] is None:
+                    filled[i] = last_val
+                else:
+                    last_val = filled[i]
         elif value is not None:
             filled = [value if v is None else v for v in filled]
         return Series(filled, self.index)
@@ -197,6 +274,9 @@ class Series:
             return math.nan
         return sum(self.data) / len(self.data)
 
+    def sum(self):
+        return sum(v for v in self.data if v is not None)
+
     def min(self):
         return min(self.data) if self.data else math.nan
 
@@ -215,19 +295,26 @@ class Series:
 
 
 class DataFrame:
-    def __init__(self, data: Dict[str, Iterable]):
-        lengths = {len(v) for v in data.values()}
+    def __init__(self, data, columns: Optional[List[str]] = None):
+        if isinstance(data, list):
+            columns = columns or (list(data[0].keys()) if data else [])
+            data_dict = {col: [row.get(col) for row in data] for col in columns}
+        else:
+            data_dict = data
+
+        lengths = {len(v) for v in data_dict.values()}
         if len(lengths) > 1:
             raise ValueError("All columns must be the same length")
-        self.columns = list(data.keys())
+        self.columns = list(columns) if columns is not None else list(data_dict.keys())
         self.data: Dict[str, Series] = {}
         length = lengths.pop() if lengths else 0
         default_index = list(range(length))
-        for key, values in data.items():
+        for key, values in data_dict.items():
             if isinstance(values, Series):
-                self.data[key] = values
+                series_val = values
             else:
-                self.data[key] = Series(values, default_index)
+                series_val = Series(values, default_index)
+            self.data[key] = series_val
         self.index = self.data[self.columns[0]].index if self.columns else []
 
     def set_index(self, column_name: str, inplace: bool = False):
@@ -255,11 +342,15 @@ class DataFrame:
             return None
         return df
 
-    def rename(self, columns: Dict[str, str], inplace: bool = False):
+    def rename(self, columns: Dict[str, str] | Callable[[str], str], inplace: bool = False):
         new_data = {}
-        for col, series in self.data.items():
-            new_name = columns.get(col, col)
-            new_data[new_name] = series
+        if callable(columns):
+            for col, series in self.data.items():
+                new_data[columns(col)] = series
+        else:
+            for col, series in self.data.items():
+                new_name = columns.get(col, col)
+                new_data[new_name] = series
         df = DataFrame(new_data)
         if inplace:
             self.data = df.data
@@ -271,9 +362,29 @@ class DataFrame:
         return self.data[key]
 
     def __setitem__(self, key: str, value: Series):
+        if not isinstance(value, Series):
+            value = Series(value, self.index)
         self.data[key] = value
         if key not in self.columns:
             self.columns.append(key)
+
+    def reindex(self, new_index: List, method: Optional[str] = None):
+        reindexed = {k: v.reindex(new_index, method=method) for k, v in self.data.items()}
+        df = DataFrame(reindexed)
+        df.index = list(new_index)
+        return df
+
+    def ffill(self):
+        filled = {k: v.ffill() for k, v in self.data.items()}
+        df = DataFrame(filled)
+        df.index = self.index
+        return df
+
+    def bfill(self):
+        filled = {k: v.bfill() for k, v in self.data.items()}
+        df = DataFrame(filled)
+        df.index = self.index
+        return df
 
     def to_csv(self, path: str, index: bool = True, index_label: str = None):
         fieldnames = ([] if not index else [index_label or "index"]) + self.columns
@@ -287,6 +398,21 @@ class DataFrame:
                 for col in self.columns:
                     row.append(self.data[col].data[i])
                 writer.writerow(row)
+
+    def to_string(self, index: bool = True):
+        headers = ([] if not index else ["index"]) + self.columns
+        lines = [" \t".join(str(h) for h in headers)]
+        for i in range(len(self.index)):
+            row = []
+            if index:
+                row.append(self.index[i])
+            for col in self.columns:
+                row.append(self.data[col].data[i])
+            lines.append(" \t".join(str(v) for v in row))
+        return "\n".join(lines)
+
+    def __str__(self):
+        return self.to_string()
 
     @classmethod
     def read_csv(cls, path: str, parse_dates: Optional[List[str]] = None, index_col: Optional[str] = None):
@@ -303,7 +429,10 @@ class DataFrame:
                     else:
                         index.append(value)
                 else:
-                    columns.setdefault(key, []).append(float(value) if value not in (None, "") else 0.0)
+                    try:
+                        columns.setdefault(key, []).append(float(value) if value not in (None, "") else 0.0)
+                    except Exception:
+                        columns.setdefault(key, []).append(value)
         data = {k: Series(v, index if index_col else None) for k, v in columns.items()}
         df = DataFrame(data)
         if index_col:
@@ -317,4 +446,12 @@ def read_csv(path: str, parse_dates: Optional[List[str]] = None, index_col: Opti
     return DataFrame.read_csv(path, parse_dates=parse_dates, index_col=index_col)
 
 
-__all__ = ["Series", "DataFrame", "date_range", "read_csv"]
+__all__ = [
+    "Series",
+    "DataFrame",
+    "date_range",
+    "read_csv",
+    "to_datetime",
+    "to_numeric",
+    "DatetimeIndex",
+]

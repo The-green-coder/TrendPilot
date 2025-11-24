@@ -11,7 +11,10 @@ We expose:
  - list_rules()
 """
 
-import pandas as pd
+try:  # pragma: no cover
+    import pandas as pd  # type: ignore
+except Exception:  # pragma: no cover
+    import pandas_stub as pd  # type: ignore
 
 # -----------------------------------------------------------
 # Helper: generic moving average allocation engine
