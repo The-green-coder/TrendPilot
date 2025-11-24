@@ -442,10 +442,10 @@ class BacktestingEngine:
             nav_df = pd.DataFrame(
                 {
                     "Date": common_index,
-                    "RiskOnAlloc": [v * 100.0 for v in allocation.values],
-                    "RiskOffAlloc": [(1.0 - v) * 100.0 for v in allocation.values],
-                    "NAV": ((portfolio_values / initial_capital) * 100.0).round(2).values,
-                    "PortfolioValue": portfolio_values.round(2).values,
+                    "RiskOnAlloc": allocation.values * 100.0,
+                    "RiskOffAlloc": (1.0 - allocation.values) * 100.0,
+                    "NAV": (portfolio_values / initial_capital).values,
+                    "PortfolioValue": portfolio_values.values,
                 }
             )
             nav_df.to_csv(nav_path, index=False)
@@ -453,64 +453,11 @@ class BacktestingEngine:
             txn_records = []
             rebalancing_iteration = 0
             prev_allocation = 0.0
-
-            def _append_trade(dt, iteration, instrument, action, price, qty, trade_value):
-                txn_cost_amount = trade_value * transaction_cost_pct / 100.0 * 0.5
-                slippage_amount = trade_value * slippage_pct / 100.0 * 0.5
-                total_cost = txn_cost_amount + slippage_amount
-                txn_records.append(
-                    {
-                        "Date": dt,
-                        "RebalancingIteration": iteration,
-                        "Instrument": instrument,
-                        "Action": action,
-                        "Price": price,
-                        "Quantity": qty,
-                        "TransactionCost": txn_cost_amount,
-                        "Slippage": slippage_amount,
-                        "TotalCost": total_cost,
-                    }
-                )
-
-            if len(common_index) > 0:
-                first_dt = common_index[0]
-                initial_alloc = float(allocation.iloc[0])
-                base_value = initial_capital
-
-                risk_on_trade_value = initial_alloc * base_value
-                if risk_on_trade_value > 0:
-                    buy_price = float(risk_on_buy_price.iloc[0])
-                    buy_qty = risk_on_trade_value / buy_price if buy_price else 0.0
-                    _append_trade(
-                        first_dt,
-                        0,
-                        risk_on,
-                        "Buy",
-                        buy_price,
-                        buy_qty,
-                        risk_on_trade_value,
-                    )
-
-                risk_off_trade_value = (1.0 - initial_alloc) * base_value
-                if risk_off_trade_value > 0:
-                    buy_price = float(risk_off_buy_price.iloc[0])
-                    buy_qty = risk_off_trade_value / buy_price if buy_price else 0.0
-                    _append_trade(
-                        first_dt,
-                        0,
-                        risk_off,
-                        "Buy",
-                        buy_price,
-                        buy_qty,
-                        risk_off_trade_value,
-                    )
-
-                prev_allocation = initial_alloc
-
-            for i in range(1, len(common_index)):
-                dt = common_index[i]
+            for i, dt in enumerate(common_index):
                 alloc_today = float(allocation.iloc[i])
-                prev_value = float(portfolio_values.iloc[i - 1])
+                prev_value = (
+                    initial_capital if i == 0 else float(portfolio_values.iloc[i - 1])
+                )
                 diff = alloc_today - prev_allocation
                 if np.isclose(diff, 0.0):
                     prev_allocation = alloc_today
@@ -518,56 +465,75 @@ class BacktestingEngine:
 
                 rebalancing_iteration += 1
                 trade_value = abs(diff) * prev_value
+                txn_cost_amount = trade_value * transaction_cost_pct / 100.0 * 0.5
+                slippage_amount = trade_value * slippage_pct / 100.0 * 0.5
+                total_cost = txn_cost_amount + slippage_amount
 
                 if diff > 0:
                     # Increasing exposure to risk-on: sell risk-off, buy risk-on
                     sell_price = float(risk_off_price.iloc[i])
                     sell_qty = trade_value / sell_price if sell_price else 0.0
-                    _append_trade(
-                        dt,
-                        rebalancing_iteration,
-                        risk_off,
-                        "Sell",
-                        sell_price,
-                        sell_qty,
-                        trade_value,
+                    txn_records.append(
+                        {
+                            "Date": dt,
+                            "RebalancingIteration": rebalancing_iteration,
+                            "Instrument": risk_off,
+                            "Action": "Sell",
+                            "Price": sell_price,
+                            "Quantity": sell_qty,
+                            "TransactionCost": txn_cost_amount,
+                            "Slippage": slippage_amount,
+                            "TotalCost": total_cost,
+                        }
                     )
 
                     buy_price = float(risk_on_buy_price.iloc[i])
                     buy_qty = trade_value / buy_price if buy_price else 0.0
-                    _append_trade(
-                        dt,
-                        rebalancing_iteration,
-                        risk_on,
-                        "Buy",
-                        buy_price,
-                        buy_qty,
-                        trade_value,
+                    txn_records.append(
+                        {
+                            "Date": dt,
+                            "RebalancingIteration": rebalancing_iteration,
+                            "Instrument": risk_on,
+                            "Action": "Buy",
+                            "Price": buy_price,
+                            "Quantity": buy_qty,
+                            "TransactionCost": txn_cost_amount,
+                            "Slippage": slippage_amount,
+                            "TotalCost": total_cost,
+                        }
                     )
                 else:
                     # Decreasing exposure to risk-on: sell risk-on, buy risk-off
                     sell_price = float(risk_on_price.iloc[i])
                     sell_qty = trade_value / sell_price if sell_price else 0.0
-                    _append_trade(
-                        dt,
-                        rebalancing_iteration,
-                        risk_on,
-                        "Sell",
-                        sell_price,
-                        sell_qty,
-                        trade_value,
+                    txn_records.append(
+                        {
+                            "Date": dt,
+                            "RebalancingIteration": rebalancing_iteration,
+                            "Instrument": risk_on,
+                            "Action": "Sell",
+                            "Price": sell_price,
+                            "Quantity": sell_qty,
+                            "TransactionCost": txn_cost_amount,
+                            "Slippage": slippage_amount,
+                            "TotalCost": total_cost,
+                        }
                     )
 
                     buy_price = float(risk_off_buy_price.iloc[i])
                     buy_qty = trade_value / buy_price if buy_price else 0.0
-                    _append_trade(
-                        dt,
-                        rebalancing_iteration,
-                        risk_off,
-                        "Buy",
-                        buy_price,
-                        buy_qty,
-                        trade_value,
+                    txn_records.append(
+                        {
+                            "Date": dt,
+                            "RebalancingIteration": rebalancing_iteration,
+                            "Instrument": risk_off,
+                            "Action": "Buy",
+                            "Price": buy_price,
+                            "Quantity": buy_qty,
+                            "TransactionCost": txn_cost_amount,
+                            "Slippage": slippage_amount,
+                            "TotalCost": total_cost,
+                        }
                     )
 
                 prev_allocation = alloc_today
