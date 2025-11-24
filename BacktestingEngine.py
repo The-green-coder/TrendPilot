@@ -9,7 +9,6 @@ Responsibilities:
 - Simulate portfolio with transaction costs & slippage
 - Compute performance & risk statistics
 - Write CSV outputs for use by the Dashboard
-- TESTING
 """
 
 from __future__ import annotations
