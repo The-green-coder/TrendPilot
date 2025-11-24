@@ -19,8 +19,16 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Dict, Sequence
 
-import numpy as np
-import pandas as pd
+# Prefer real numpy/pandas; fall back to lightweight stubs for offline environments
+try:  # pragma: no cover
+    import numpy as np  # type: ignore
+except Exception:  # pragma: no cover
+    import numpy_stub as np  # type: ignore
+
+try:  # pragma: no cover
+    import pandas as pd  # type: ignore
+except Exception:  # pragma: no cover
+    import pandas_stub as pd  # type: ignore
 
 from MarketData import load_market_data
 
@@ -193,6 +201,7 @@ class BacktestingEngine:
         - backtesting_period: str
         - price_preference_buy: str
         - price_preference_sell: str
+        - record_backtest_details: Yes/No to emit NAV and transaction CSVs
         - delay: int
         - results_path: str
         - strategy_name: str
@@ -210,6 +219,9 @@ class BacktestingEngine:
         backtesting_period: str = config["backtesting_period"]
         price_preference_buy: str = config["price_preference_buy"]
         price_preference_sell: str = config["price_preference_sell"]
+        record_backtest_details: bool = str(
+            config.get("record_backtest_details", "No")
+        ).strip().lower() == "yes"
         delay: int = int(config.get("delay", config.get("delay_between_signal_and_trade", 0)))
         results_path: str = config.get("results_path", "ResultsData")
         risk_free_rate: float = float(config.get("risk_free_rate", 0.0))
@@ -286,14 +298,17 @@ class BacktestingEngine:
         allocation = self._apply_delay(allocation_rebalanced, delay)
 
         # ---- compute returns ---------------------------------------------
-        def _price_series(df: pd.DataFrame) -> pd.Series:
-            raw = _select_price_column(df, price_preference_sell)
+        def _price_series(df: pd.DataFrame, preference: str) -> pd.Series:
+            raw = _select_price_column(df, preference)
             s = pd.to_numeric(raw, errors="coerce")
             return s.ffill().bfill()
 
-        risk_on_price = _price_series(risk_on_df)
-        risk_off_price = _price_series(risk_off_df)
-        benchmark_price = _price_series(benchmark_df)
+        risk_on_price = _price_series(risk_on_df, price_preference_sell)
+        risk_off_price = _price_series(risk_off_df, price_preference_sell)
+        benchmark_price = _price_series(benchmark_df, price_preference_sell)
+
+        risk_on_buy_price = _price_series(risk_on_df, price_preference_buy)
+        risk_off_buy_price = _price_series(risk_off_df, price_preference_buy)
 
         risk_on_returns = risk_on_price.pct_change().fillna(0.0)
         risk_off_returns = risk_off_price.pct_change().fillna(0.0)
@@ -397,11 +412,13 @@ class BacktestingEngine:
             }
         )
 
+        risk_off_alloc = 1.0 - allocation
+
         allocation_df = pd.DataFrame(
             {
                 "date": common_index,
                 "allocation_risk_on": allocation.values,
-                "allocation_risk_off": 1.0 - allocation.values,
+                "allocation_risk_off": risk_off_alloc.values,
                 "portfolio_value": portfolio_values.values,
                 "benchmark_value": benchmark_values.values,
                 "risk_on_price": risk_on_price.values,
@@ -417,6 +434,128 @@ class BacktestingEngine:
         performance_stats.to_csv(perf_path, index=False)
         risk_stats.to_csv(risk_path, index=False)
         allocation_df.to_csv(alloc_path, index=False)
+
+        if record_backtest_details:
+            nav_path = os.path.join(
+                strategy_dir, f"{strategy_name}_DailyNAV_{timestamp}.csv"
+            )
+            nav_df = pd.DataFrame(
+                {
+                    "Date": common_index,
+                    "RiskOnAlloc": [v * 100.0 for v in allocation.values],
+                    "RiskOffAlloc": [(1.0 - v) * 100.0 for v in allocation.values],
+                    "NAV": (portfolio_values / initial_capital).values,
+                    "PortfolioValue": portfolio_values.values,
+                }
+            )
+            nav_df.to_csv(nav_path, index=False)
+
+            txn_records = []
+            rebalancing_iteration = 0
+            prev_allocation = 0.0
+            for i, dt in enumerate(common_index):
+                alloc_today = float(allocation.iloc[i])
+                prev_value = (
+                    initial_capital if i == 0 else float(portfolio_values.iloc[i - 1])
+                )
+                diff = alloc_today - prev_allocation
+                if np.isclose(diff, 0.0):
+                    prev_allocation = alloc_today
+                    continue
+
+                rebalancing_iteration += 1
+                trade_value = abs(diff) * prev_value
+                txn_cost_amount = trade_value * transaction_cost_pct / 100.0 * 0.5
+                slippage_amount = trade_value * slippage_pct / 100.0 * 0.5
+                total_cost = txn_cost_amount + slippage_amount
+
+                if diff > 0:
+                    # Increasing exposure to risk-on: sell risk-off, buy risk-on
+                    sell_price = float(risk_off_price.iloc[i])
+                    sell_qty = trade_value / sell_price if sell_price else 0.0
+                    txn_records.append(
+                        {
+                            "Date": dt,
+                            "RebalancingIteration": rebalancing_iteration,
+                            "Instrument": risk_off,
+                            "Action": "Sell",
+                            "Price": sell_price,
+                            "Quantity": sell_qty,
+                            "TransactionCost": txn_cost_amount,
+                            "Slippage": slippage_amount,
+                            "TotalCost": total_cost,
+                        }
+                    )
+
+                    buy_price = float(risk_on_buy_price.iloc[i])
+                    buy_qty = trade_value / buy_price if buy_price else 0.0
+                    txn_records.append(
+                        {
+                            "Date": dt,
+                            "RebalancingIteration": rebalancing_iteration,
+                            "Instrument": risk_on,
+                            "Action": "Buy",
+                            "Price": buy_price,
+                            "Quantity": buy_qty,
+                            "TransactionCost": txn_cost_amount,
+                            "Slippage": slippage_amount,
+                            "TotalCost": total_cost,
+                        }
+                    )
+                else:
+                    # Decreasing exposure to risk-on: sell risk-on, buy risk-off
+                    sell_price = float(risk_on_price.iloc[i])
+                    sell_qty = trade_value / sell_price if sell_price else 0.0
+                    txn_records.append(
+                        {
+                            "Date": dt,
+                            "RebalancingIteration": rebalancing_iteration,
+                            "Instrument": risk_on,
+                            "Action": "Sell",
+                            "Price": sell_price,
+                            "Quantity": sell_qty,
+                            "TransactionCost": txn_cost_amount,
+                            "Slippage": slippage_amount,
+                            "TotalCost": total_cost,
+                        }
+                    )
+
+                    buy_price = float(risk_off_buy_price.iloc[i])
+                    buy_qty = trade_value / buy_price if buy_price else 0.0
+                    txn_records.append(
+                        {
+                            "Date": dt,
+                            "RebalancingIteration": rebalancing_iteration,
+                            "Instrument": risk_off,
+                            "Action": "Buy",
+                            "Price": buy_price,
+                            "Quantity": buy_qty,
+                            "TransactionCost": txn_cost_amount,
+                            "Slippage": slippage_amount,
+                            "TotalCost": total_cost,
+                        }
+                    )
+
+                prev_allocation = alloc_today
+
+            txn_path = os.path.join(
+                strategy_dir, f"{strategy_name}_TransactionRecord_{timestamp}.csv"
+            )
+            txn_df = pd.DataFrame(
+                txn_records,
+                columns=[
+                    "Date",
+                    "RebalancingIteration",
+                    "Instrument",
+                    "Action",
+                    "Price",
+                    "Quantity",
+                    "TransactionCost",
+                    "Slippage",
+                    "TotalCost",
+                ],
+            )
+            txn_df.to_csv(txn_path, index=False)
 
         LOGGER.info(
             "Average allocation: %.2f%% Risk-On, %.2f%% Risk-Off",
