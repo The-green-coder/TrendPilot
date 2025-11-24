@@ -439,23 +439,13 @@ class BacktestingEngine:
             nav_path = os.path.join(
                 strategy_dir, f"{strategy_name}_DailyNAV_{timestamp}.csv"
             )
-            nav_base = float(initial_capital)
-
-            def _fmt_two(val: float) -> str:
-                return f"{float(val):.2f}"
-
-            nav_values = [
-                _fmt_two((float(pv) / nav_base) * 100.0) for pv in portfolio_values
-            ]
-            portfolio_value_values = [_fmt_two(float(pv)) for pv in portfolio_values]
-
             nav_df = pd.DataFrame(
                 {
                     "Date": common_index,
-                    "RiskOnAlloc": [_fmt_two(v * 100.0) for v in allocation.values],
-                    "RiskOffAlloc": [_fmt_two((1.0 - v) * 100.0) for v in allocation.values],
-                    "NAV": nav_values,
-                    "PortfolioValue": portfolio_value_values,
+                    "RiskOnAlloc": allocation.values * 100.0,
+                    "RiskOffAlloc": (1.0 - allocation.values) * 100.0,
+                    "NAV": (portfolio_values / initial_capital).values,
+                    "PortfolioValue": portfolio_values.values,
                 }
             )
             nav_df.to_csv(nav_path, index=False)
@@ -463,69 +453,11 @@ class BacktestingEngine:
             txn_records = []
             rebalancing_iteration = 0
             prev_allocation = 0.0
-
-            def _append_trade(dt, iteration, instrument, action, price, qty, trade_value):
-                txn_cost_amount = trade_value * transaction_cost_pct / 100.0 * 0.5
-                slippage_amount = trade_value * slippage_pct / 100.0 * 0.5
-                total_cost = txn_cost_amount + slippage_amount
-                price_rounded = _fmt_two(float(price))
-                qty_rounded = _fmt_two(float(qty))
-                txn_cost_rounded = _fmt_two(float(txn_cost_amount))
-                slippage_rounded = _fmt_two(float(slippage_amount))
-                total_cost_rounded = _fmt_two(float(total_cost))
-                txn_records.append(
-                    {
-                        "Date": dt,
-                        "RebalancingIteration": iteration,
-                        "Instrument": instrument,
-                        "Action": action,
-                        "Price": price_rounded,
-                        "Quantity": qty_rounded,
-                        "TransactionCost": txn_cost_rounded,
-                        "Slippage": slippage_rounded,
-                        "TotalCost": total_cost_rounded,
-                    }
-                )
-
-            if len(common_index) > 0:
-                first_dt = common_index[0]
-                initial_alloc = float(allocation.iloc[0])
-                base_value = float(initial_capital)
-
-                risk_on_trade_value = initial_alloc * base_value
-                if risk_on_trade_value > 0:
-                    buy_price = float(risk_on_buy_price.iloc[0])
-                    buy_qty = risk_on_trade_value / buy_price if buy_price else 0.0
-                    _append_trade(
-                        first_dt,
-                        0,
-                        risk_on,
-                        "Buy",
-                        buy_price,
-                        buy_qty,
-                        risk_on_trade_value,
-                    )
-
-                risk_off_trade_value = (1.0 - initial_alloc) * base_value
-                if risk_off_trade_value > 0:
-                    buy_price = float(risk_off_buy_price.iloc[0])
-                    buy_qty = risk_off_trade_value / buy_price if buy_price else 0.0
-                    _append_trade(
-                        first_dt,
-                        0,
-                        risk_off,
-                        "Buy",
-                        buy_price,
-                        buy_qty,
-                        risk_off_trade_value,
-                    )
-
-                prev_allocation = initial_alloc
-
-            for i in range(1, len(common_index)):
-                dt = common_index[i]
+            for i, dt in enumerate(common_index):
                 alloc_today = float(allocation.iloc[i])
-                prev_value = float(portfolio_values.iloc[i - 1])
+                prev_value = (
+                    initial_capital if i == 0 else float(portfolio_values.iloc[i - 1])
+                )
                 diff = alloc_today - prev_allocation
                 if np.isclose(diff, 0.0):
                     prev_allocation = alloc_today
@@ -533,56 +465,75 @@ class BacktestingEngine:
 
                 rebalancing_iteration += 1
                 trade_value = abs(diff) * prev_value
+                txn_cost_amount = trade_value * transaction_cost_pct / 100.0 * 0.5
+                slippage_amount = trade_value * slippage_pct / 100.0 * 0.5
+                total_cost = txn_cost_amount + slippage_amount
 
                 if diff > 0:
                     # Increasing exposure to risk-on: sell risk-off, buy risk-on
                     sell_price = float(risk_off_price.iloc[i])
                     sell_qty = trade_value / sell_price if sell_price else 0.0
-                    _append_trade(
-                        dt,
-                        rebalancing_iteration,
-                        risk_off,
-                        "Sell",
-                        sell_price,
-                        sell_qty,
-                        trade_value,
+                    txn_records.append(
+                        {
+                            "Date": dt,
+                            "RebalancingIteration": rebalancing_iteration,
+                            "Instrument": risk_off,
+                            "Action": "Sell",
+                            "Price": sell_price,
+                            "Quantity": sell_qty,
+                            "TransactionCost": txn_cost_amount,
+                            "Slippage": slippage_amount,
+                            "TotalCost": total_cost,
+                        }
                     )
 
                     buy_price = float(risk_on_buy_price.iloc[i])
                     buy_qty = trade_value / buy_price if buy_price else 0.0
-                    _append_trade(
-                        dt,
-                        rebalancing_iteration,
-                        risk_on,
-                        "Buy",
-                        buy_price,
-                        buy_qty,
-                        trade_value,
+                    txn_records.append(
+                        {
+                            "Date": dt,
+                            "RebalancingIteration": rebalancing_iteration,
+                            "Instrument": risk_on,
+                            "Action": "Buy",
+                            "Price": buy_price,
+                            "Quantity": buy_qty,
+                            "TransactionCost": txn_cost_amount,
+                            "Slippage": slippage_amount,
+                            "TotalCost": total_cost,
+                        }
                     )
                 else:
                     # Decreasing exposure to risk-on: sell risk-on, buy risk-off
                     sell_price = float(risk_on_price.iloc[i])
                     sell_qty = trade_value / sell_price if sell_price else 0.0
-                    _append_trade(
-                        dt,
-                        rebalancing_iteration,
-                        risk_on,
-                        "Sell",
-                        sell_price,
-                        sell_qty,
-                        trade_value,
+                    txn_records.append(
+                        {
+                            "Date": dt,
+                            "RebalancingIteration": rebalancing_iteration,
+                            "Instrument": risk_on,
+                            "Action": "Sell",
+                            "Price": sell_price,
+                            "Quantity": sell_qty,
+                            "TransactionCost": txn_cost_amount,
+                            "Slippage": slippage_amount,
+                            "TotalCost": total_cost,
+                        }
                     )
 
                     buy_price = float(risk_off_buy_price.iloc[i])
                     buy_qty = trade_value / buy_price if buy_price else 0.0
-                    _append_trade(
-                        dt,
-                        rebalancing_iteration,
-                        risk_off,
-                        "Buy",
-                        buy_price,
-                        buy_qty,
-                        trade_value,
+                    txn_records.append(
+                        {
+                            "Date": dt,
+                            "RebalancingIteration": rebalancing_iteration,
+                            "Instrument": risk_off,
+                            "Action": "Buy",
+                            "Price": buy_price,
+                            "Quantity": buy_qty,
+                            "TransactionCost": txn_cost_amount,
+                            "Slippage": slippage_amount,
+                            "TotalCost": total_cost,
+                        }
                     )
 
                 prev_allocation = alloc_today
@@ -687,26 +638,14 @@ class BacktestingEngine:
             }
         )
 
-        def _safe_to_string(df: pd.DataFrame) -> str:
-            try:
-                return df.to_string(index=False)
-            except Exception:
-                # pandas_stub compatibility
-                headers = [" ".join(df.columns)] if getattr(df, "columns", None) else []
-                rows = []
-                for i in range(len(getattr(df, "index", []))):
-                    row = [str(df.data[col].data[i]) for col in df.columns]
-                    rows.append(" ".join(row))
-                return "\n".join(headers + rows)
-
         print("\nStrategy Performance Summary")
-        print(_safe_to_string(strategy_perf_table))
+        print(strategy_perf_table.to_string(index=False))
 
         print("\nStrategy vs Benchmark")
-        print(_safe_to_string(comparison_table))
+        print(comparison_table.to_string(index=False))
 
         print("\nRisk Statistics")
-        print(_safe_to_string(risk_table))
+        print(risk_table.to_string(index=False))
 
         return BacktestResult(
             performance_stats=performance_stats,
