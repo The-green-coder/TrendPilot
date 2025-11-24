@@ -399,6 +399,21 @@ class DataFrame:
                     row.append(self.data[col].data[i])
                 writer.writerow(row)
 
+    def to_string(self, index: bool = True):
+        headers = ([] if not index else ["index"]) + self.columns
+        lines = [" \t".join(str(h) for h in headers)]
+        for i in range(len(self.index)):
+            row = []
+            if index:
+                row.append(self.index[i])
+            for col in self.columns:
+                row.append(self.data[col].data[i])
+            lines.append(" \t".join(str(v) for v in row))
+        return "\n".join(lines)
+
+    def __str__(self):
+        return self.to_string()
+
     @classmethod
     def read_csv(cls, path: str, parse_dates: Optional[List[str]] = None, index_col: Optional[str] = None):
         with open(path, newline="") as csvfile:
