@@ -19,16 +19,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Dict, Sequence
 
-# Prefer real numpy/pandas; fall back to lightweight stubs for offline environments
-try:  # pragma: no cover
-    import numpy as np  # type: ignore
-except Exception:  # pragma: no cover
-    import numpy_stub as np  # type: ignore
-
-try:  # pragma: no cover
-    import pandas as pd  # type: ignore
-except Exception:  # pragma: no cover
-    import pandas_stub as pd  # type: ignore
+import numpy as np
+import pandas as pd
 
 from MarketData import load_market_data
 
@@ -39,6 +31,7 @@ LOGGER.setLevel(logging.INFO)
 # ---------------------------------------------------------------------------
 # Helper dataclass
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class BacktestResult:
@@ -55,6 +48,7 @@ class BacktestResult:
 # ---------------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------------
+
 
 def _parse_backtesting_period(period: str) -> (date, date):
     """
@@ -139,6 +133,7 @@ def _select_price_column(df: pd.DataFrame, preference: str) -> pd.Series:
 # ---------------------------------------------------------------------------
 # Backtesting engine
 # ---------------------------------------------------------------------------
+
 
 class BacktestingEngine:
     """
@@ -278,10 +273,9 @@ class BacktestingEngine:
         benchmark_df = data[benchmark]
 
         # ---- signal prices & rule ----------------------------------------
-        # Use robust numeric conversion to avoid issues like 'qqq' strings
+        # Use robust numeric conversion to avoid issues like stray strings.
         raw_signal_prices = _select_price_column(risk_on_df, price_preference_buy)
-        signal_price_series = pd.to_numeric(raw_signal_prices, errors="coerce")
-        signal_price_series = signal_price_series.ffill().bfill()
+        signal_price_series = pd.to_numeric(raw_signal_prices, errors="coerce").ffill().bfill()
 
         # ensure rule output is a Series aligned to common_index
         raw_allocation = rule(signal_price_series)
@@ -290,7 +284,6 @@ class BacktestingEngine:
         raw_allocation = raw_allocation.clip(0.0, 1.0).ffill().bfill().fillna(0.0)
 
         # ---- rebalance using resample (no manual .loc) -------------------
-        # resample to rebalance frequency (e.g. weekly), then forward-fill
         allocation_resampled = raw_allocation.resample(rebalance_alias).first()
         allocation_rebalanced = allocation_resampled.reindex(common_index, method="ffill").bfill()
 
@@ -298,17 +291,14 @@ class BacktestingEngine:
         allocation = self._apply_delay(allocation_rebalanced, delay)
 
         # ---- compute returns ---------------------------------------------
-        def _price_series(df: pd.DataFrame, preference: str) -> pd.Series:
-            raw = _select_price_column(df, preference)
+        def _price_series(df: pd.DataFrame) -> pd.Series:
+            raw = _select_price_column(df, price_preference_sell)
             s = pd.to_numeric(raw, errors="coerce")
             return s.ffill().bfill()
 
-        risk_on_price = _price_series(risk_on_df, price_preference_sell)
-        risk_off_price = _price_series(risk_off_df, price_preference_sell)
-        benchmark_price = _price_series(benchmark_df, price_preference_sell)
-
-        risk_on_buy_price = _price_series(risk_on_df, price_preference_buy)
-        risk_off_buy_price = _price_series(risk_off_df, price_preference_buy)
+        risk_on_price = _price_series(risk_on_df)
+        risk_off_price = _price_series(risk_off_df)
+        benchmark_price = _price_series(benchmark_df)
 
         risk_on_returns = risk_on_price.pct_change().fillna(0.0)
         risk_off_returns = risk_off_price.pct_change().fillna(0.0)
@@ -412,13 +402,11 @@ class BacktestingEngine:
             }
         )
 
-        risk_off_alloc = 1.0 - allocation
-
         allocation_df = pd.DataFrame(
             {
                 "date": common_index,
                 "allocation_risk_on": allocation.values,
-                "allocation_risk_off": risk_off_alloc.values,
+                "allocation_risk_off": 1.0 - allocation.values,
                 "portfolio_value": portfolio_values.values,
                 "benchmark_value": benchmark_values.values,
                 "risk_on_price": risk_on_price.values,
@@ -435,29 +423,92 @@ class BacktestingEngine:
         risk_stats.to_csv(risk_path, index=False)
         allocation_df.to_csv(alloc_path, index=False)
 
+        # ------------------------------------------------------------------
+        # Extra detailed outputs: Daily NAV + Transaction Record
+        # ------------------------------------------------------------------
         if record_backtest_details:
             nav_path = os.path.join(
                 strategy_dir, f"{strategy_name}_DailyNAV_{timestamp}.csv"
             )
+            # Daily NAV uses 100 as the base (not 1.0) and all numeric values are
+            # rounded to 2 decimal places for readability.
             nav_df = pd.DataFrame(
                 {
                     "Date": common_index,
-                    "RiskOnAlloc": allocation.values * 100.0,
-                    "RiskOffAlloc": (1.0 - allocation.values) * 100.0,
-                    "NAV": (portfolio_values / initial_capital).values,
-                    "PortfolioValue": portfolio_values.values,
+                    "RiskOnAlloc": (allocation.values * 100.0).round(2),
+                    "RiskOffAlloc": ((1.0 - allocation.values) * 100.0).round(2),
+                    # NAV is portfolio value scaled to 100 = initial capital
+                    "NAV": ((portfolio_values / initial_capital) * 100.0).round(2),
+                    "PortfolioValue": portfolio_values.round(2).values,
                 }
             )
             nav_df.to_csv(nav_path, index=False)
 
+            # ------------------------------------------------------------------
+            # Transaction log
+            # ------------------------------------------------------------------
             txn_records = []
             rebalancing_iteration = 0
-            prev_allocation = 0.0
-            for i, dt in enumerate(common_index):
+
+            # ------------------------------------------------------------------
+            # Initial buying at the start of the backtest (RebalancingIteration=0)
+            # This records the initial portfolio construction in the transaction
+            # log for transparency. We do not charge transaction costs here to
+            # keep it consistent with the return path (which starts from the
+            # initial capital without deducting initial costs).
+            # ------------------------------------------------------------------
+            if len(common_index) > 0:
+                dt0 = common_index[0]
+                alloc0 = float(allocation.iloc[0])
+                prev_value0 = initial_capital
+
+                # Buy Risk-On portion
+                if alloc0 > 0.0:
+                    buy_price_on = float(risk_on_price.iloc[0])
+                    buy_qty_on = (alloc0 * prev_value0) / buy_price_on if buy_price_on else 0.0
+                    txn_records.append(
+                        {
+                            "Date": dt0,
+                            "RebalancingIteration": 0,
+                            "Instrument": risk_on,
+                            "Action": "Buy",
+                            "Price": buy_price_on,
+                            "Quantity": buy_qty_on,
+                            "TransactionCost": 0.0,
+                            "Slippage": 0.0,
+                            "TotalCost": 0.0,
+                        }
+                    )
+
+                # Buy Risk-Off portion
+                if alloc0 < 1.0:
+                    buy_price_off = float(risk_off_price.iloc[0])
+                    buy_qty_off = ((1.0 - alloc0) * prev_value0) / buy_price_off if buy_price_off else 0.0
+                    txn_records.append(
+                        {
+                            "Date": dt0,
+                            "RebalancingIteration": 0,
+                            "Instrument": risk_off,
+                            "Action": "Buy",
+                            "Price": buy_price_off,
+                            "Quantity": buy_qty_off,
+                            "TransactionCost": 0.0,
+                            "Slippage": 0.0,
+                            "TotalCost": 0.0,
+                        }
+                    )
+
+                prev_allocation = alloc0
+            else:
+                prev_allocation = 0.0
+
+            # ------------------------------------------------------------------
+            # Subsequent rebalancing trades (RebalancingIteration >= 1)
+            # ------------------------------------------------------------------
+            for i in range(1, len(common_index)):
+                dt = common_index[i]
                 alloc_today = float(allocation.iloc[i])
-                prev_value = (
-                    initial_capital if i == 0 else float(portfolio_values.iloc[i - 1])
-                )
+                prev_value = float(portfolio_values.iloc[i - 1])
                 diff = alloc_today - prev_allocation
                 if np.isclose(diff, 0.0):
                     prev_allocation = alloc_today
@@ -487,7 +538,7 @@ class BacktestingEngine:
                         }
                     )
 
-                    buy_price = float(risk_on_buy_price.iloc[i])
+                    buy_price = float(risk_on_price.iloc[i])
                     buy_qty = trade_value / buy_price if buy_price else 0.0
                     txn_records.append(
                         {
@@ -520,7 +571,7 @@ class BacktestingEngine:
                         }
                     )
 
-                    buy_price = float(risk_off_buy_price.iloc[i])
+                    buy_price = float(risk_off_price.iloc[i])
                     buy_qty = trade_value / buy_price if buy_price else 0.0
                     txn_records.append(
                         {
@@ -555,6 +606,11 @@ class BacktestingEngine:
                     "TotalCost",
                 ],
             )
+            # Round key monetary fields to 2 decimal places for readability
+            for col in ["Price", "TransactionCost", "Slippage", "TotalCost"]:
+                if col in txn_df.columns:
+                    txn_df[col] = pd.to_numeric(txn_df[col], errors="coerce").round(2)
+
             txn_df.to_csv(txn_path, index=False)
 
         LOGGER.info(
@@ -583,17 +639,22 @@ class BacktestingEngine:
             max_dd_benchmark * 100.0,
         )
 
+        # ------------------------------------------------------------------
+        # Pretty tables in the console (terminal)
+        # ------------------------------------------------------------------
         strategy_perf_table = pd.DataFrame(
             {
                 "Metric": [
-                    "Final Portfolio Value",
-                    "Total Return %",
-                    "Avg Risk-On Alloc %",
-                    "Avg Risk-Off Alloc %",
-                    "Time Any Risk-On %",
-                    "Time Full Risk-Off %",
-                    "Risk-On Contribution %",
-                    "Risk-Off Contribution %",
+                    "Final value",
+                    "Total return (%)",
+                    "Avg Risk-On alloc (%)",
+                    "Avg Risk-Off alloc (%)",
+                    "Time any Risk-On (%)",
+                    "Time fully Risk-Off (%)",
+                    "Risk-On contribution (%)",
+                    "Risk-Off contribution (%)",
+                    "Risk-On total return (%)",
+                    "Risk-Off total return (%)",
                 ],
                 "Value": [
                     round(final_portfolio_value, 2),
@@ -604,19 +665,30 @@ class BacktestingEngine:
                     round(time_full_risk_off_pct, 2),
                     round(risk_on_contrib_pct, 2),
                     round(risk_off_contrib_pct, 2),
+                    round(risk_on_total_return_pct, 2),
+                    round(risk_off_total_return_pct, 2),
                 ],
             }
         )
 
         comparison_table = pd.DataFrame(
             {
-                "Metric": ["Final Value", "Total Return %"],
+                "Metric": [
+                    "Final value (Strategy)",
+                    "Final value (Benchmark)",
+                    "Total return (Strategy, %)",
+                    "Total return (Benchmark, %)",
+                ],
                 "Strategy": [
                     round(final_portfolio_value, 2),
+                    "",
                     round(performance_stats["total_return_pct"].iloc[0], 2),
+                    "",
                 ],
                 "Benchmark": [
+                    "",
                     round(final_benchmark_value, 2),
+                    "",
                     round(performance_stats["benchmark_return_pct"].iloc[0], 2),
                 ],
             }
@@ -624,15 +696,20 @@ class BacktestingEngine:
 
         risk_table = pd.DataFrame(
             {
-                "Metric": ["Sharpe", "Volatility", "Max Drawdown %"],
-                "Strategy": [
-                    round(risk_stats["sharpe_strategy"].iloc[0], 3),
-                    round(risk_stats["vol_strategy"].iloc[0], 4),
-                    round(risk_stats["max_drawdown_strategy"].iloc[0] * 100.0, 2),
+                "Metric": [
+                    "Sharpe ratio",
+                    "Sharpe ratio (BM)",
+                    "Volatility (%)",
+                    "Volatility (BM, %)",
+                    "Max drawdown (%)",
+                    "Max drawdown (BM, %)",
                 ],
-                "Benchmark": [
+                "Value": [
+                    round(risk_stats["sharpe_strategy"].iloc[0], 3),
                     round(risk_stats["sharpe_benchmark"].iloc[0], 3),
-                    round(risk_stats["vol_benchmark"].iloc[0], 4),
+                    round(risk_stats["vol_strategy"].iloc[0] * 100.0, 2),
+                    round(risk_stats["vol_benchmark"].iloc[0] * 100.0, 2),
+                    round(risk_stats["max_drawdown_strategy"].iloc[0] * 100.0, 2),
                     round(risk_stats["max_drawdown_benchmark"].iloc[0] * 100.0, 2),
                 ],
             }
