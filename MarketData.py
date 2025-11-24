@@ -12,8 +12,15 @@ import os
 from datetime import datetime, timedelta
 from typing import Dict, Iterable, Tuple
 
-import numpy as np
-import pandas as pd
+try:  # pragma: no cover
+    import numpy as np  # type: ignore
+except Exception:  # pragma: no cover
+    import numpy_stub as np  # type: ignore
+
+try:  # pragma: no cover
+    import pandas as pd  # type: ignore
+except Exception:  # pragma: no cover
+    import pandas_stub as pd  # type: ignore
 
 try:  # pragma: no cover - optional dependency
     import yfinance as yf
